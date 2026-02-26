@@ -45,15 +45,103 @@ python createdb-insert-sample-data.py
 
 This creates `projectpulse_demo.db` (SQLite) and `projectpulse_schema.sql` in the project root with the full schema and sample data: projects (IncidentOps, CostOptimizer), events, attribution links, status snapshots, and convenience views.
 
+### 4. Set up MCP virtual environment (requires Python 3.10+)
+
+```bash
+python3.12 -m venv mcp/venv
+source mcp/venv/bin/activate
+pip install fastmcp requests
+deactivate
+```
+
+### 5. Run ProjectPulse
+
+```bash
+python run.py
+```
+
+This starts both services:
+
+| Service | URL | Description |
+|---------|-----|-------------|
+| Flask API | http://127.0.0.1:5050 | REST API serving project data from SQLite |
+| MCP Server | http://127.0.0.1:8000/sse | LLM-facing tools over SSE, calls the Flask API |
+
+Custom ports:
+
+```bash
+python run.py --flask-port 6000 --mcp-port 9000
+```
+
+Press `Ctrl+C` to stop both services.
+
+---
+
+## Querying with natural language
+
+### Cursor IDE
+
+A `.cursor/mcp.json` is included. After running `python run.py`, reload Cursor (`Cmd+Shift+P` → "Reload Window"). Then ask naturally in chat:
+
+- *"What projects are being tracked?"*
+- *"What's the status of IncidentOps?"*
+- *"Show me the blockers"*
+- *"What Jira updates happened recently?"*
+
+### Claude Desktop
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "projectpulse": {
+      "url": "http://127.0.0.1:8000/sse"
+    }
+  }
+}
+```
+
+### MCP Inspector (testing)
+
+```bash
+npx @modelcontextprotocol/inspector
+```
+
+Open http://localhost:6274, select **SSE** transport, connect to `http://127.0.0.1:8000/sse`.
+
+---
+
+## API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/projects` | List all active projects |
+| GET | `/api/pulse?project_id=...` | Structured status pulse with evidence links |
+| GET | `/api/events?project_id=...` | Event feed (optional: `source_type`, `limit`, `offset`) |
+| GET | `/api/health` | Health check |
+
+---
+
+## MCP Tools
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `list_projects` | *(none)* | List all active projects |
+| `get_project_pulse` | `project_id` | Status summary with progress, blockers, decisions, risks |
+| `get_project_events` | `project_id`, `source_type?`, `limit?` | Raw event feed from Slack and Jira |
+
 ---
 
 ## Scripts
 
 | Script | Description |
-|--------|--------------|
+|--------|-------------|
+| `run.py` | Master launcher — starts Flask API and MCP Server |
 | `createdb-insert-sample-data.py` | Creates the SQLite database, schema, and sample data |
-
-
+| `create-db.py` | Creates empty database with schema only |
+| `API/app.py` | Flask REST API |
+| `mcp/server.py` | FastMCP server wrapping the Flask API |
 
 ---
 
