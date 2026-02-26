@@ -1,0 +1,574 @@
+"""ProjectPulse AI — Streamlit Dashboard
+
+Consumes the Flask REST API (default http://127.0.0.1:5050) to render
+five core views:
+  1. Project Overview  (latest AI-generated snapshot)
+  2. Changes           ("What changed since Monday?")
+  3. Blockers          (auto-detected blocker signals)
+  4. Weekly Summary    (structured weekly report + chart)
+  5. Ask ProjectPulse  (keyword Q&A grounded in project data)
+"""
+
+import datetime
+import os
+
+import requests
+import streamlit as st
+import plotly.graph_objects as go
+
+API_BASE = os.environ.get("PROJECTPULSE_API_URL", "http://127.0.0.1:5050")
+
+SECTION_COLORS = {
+    "progress": "#10b981",
+    "blockers": "#ef4444",
+    "decisions": "#6366f1",
+    "next_steps": "#f59e0b",
+    "risks": "#f97316",
+    "newly_completed": "#10b981",
+    "new_blockers": "#ef4444",
+    "new_decisions": "#6366f1",
+    "other_activity": "#64748b",
+}
+
+SECTION_LABELS = {
+    "progress": "Progress",
+    "blockers": "Blockers",
+    "decisions": "Decisions",
+    "next_steps": "Next Steps",
+    "risks": "Risks",
+    "newly_completed": "Newly Completed",
+    "new_blockers": "New Blockers",
+    "new_decisions": "New Decisions",
+    "other_activity": "Other Activity",
+}
+
+
+def api_get(path: str, params: dict | None = None) -> dict | None:
+    try:
+        resp = requests.get(f"{API_BASE}{path}", params=params, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.ConnectionError:
+        st.error(
+            f"Cannot reach the Flask API at **{API_BASE}**. "
+            "Make sure it is running (`python run.py` or `python api/app.py`)."
+        )
+        st.stop()
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            return None
+        st.error(f"API error: {exc}")
+        return None
+
+
+def source_badge(source_type: str) -> str:
+    if source_type == "slack":
+        return ":violet[Slack]"
+    if source_type == "jira":
+        return ":blue[Jira]"
+    return f":gray[{source_type}]"
+
+
+def kind_label(kind: str) -> str:
+    return kind.replace("_", " ").title()
+
+
+# ── Pages ────────────────────────────────────────────────────────────
+
+
+def page_overview(project_id: str, project_name: str):
+    st.header(f"Project Overview — {project_name}")
+
+    data = api_get("/api/pulse", {"project_id": project_id})
+    if not data:
+        st.warning("Project not found.")
+        return
+
+    if data.get("snapshot_at") is None:
+        st.info(data.get("message", "No status snapshot available yet."))
+        return
+
+    headline = data.get("headline", "")
+    window = data.get("window", {})
+    w_start = (window.get("start") or "")[:10]
+    w_end = (window.get("end") or "")[:10]
+
+    st.markdown(
+        f"""
+        <div style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
+                    padding: 24px 28px; border-radius: 12px; margin-bottom: 24px;">
+            <p style="color:#94a3b8; font-size:0.85rem; margin:0 0 6px 0;">
+                Snapshot &nbsp;·&nbsp; {w_start} → {w_end}
+            </p>
+            <p style="color:#f8fafc; font-size:1.25rem; font-weight:600; margin:0;">
+                {headline}
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    sections = data.get("sections", {})
+    for key in ("progress", "blockers", "decisions", "next_steps", "risks"):
+        items = sections.get(key, [])
+        label = SECTION_LABELS.get(key, key)
+        color = SECTION_COLORS.get(key, "#64748b")
+
+        st.markdown(
+            f"<h4 style='color:{color}; margin-bottom:4px;'>{label}</h4>",
+            unsafe_allow_html=True,
+        )
+
+        if not items:
+            st.caption("No items in this section.")
+        else:
+            for item in items:
+                owner = item.get("owner", "")
+                owner_md = f" — **{owner}**" if owner else ""
+                st.markdown(f"- {item['text']}{owner_md}")
+                for ev in item.get("evidence", []):
+                    icon = "Slack" if ev["source_type"] == "slack" else "Jira"
+                    st.caption(
+                        f"&nbsp;&nbsp;→ [{icon}]({ev['permalink']}) — _{ev['snippet']}_"
+                    )
+        st.divider()
+
+
+def page_changes(project_id: str, project_name: str):
+    st.header(f"Changes — {project_name}")
+    st.caption("Filter events by date to see what changed.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        preset = st.selectbox(
+            "Quick filter",
+            ["Since Monday", "Last 7 days", "Last 24 hours", "Custom"],
+            index=0,
+        )
+    with col2:
+        today = datetime.date.today()
+        if preset == "Custom":
+            since_date = st.date_input(
+                "Since date", value=today - datetime.timedelta(days=7)
+            )
+        elif preset == "Since Monday":
+            since_date = today - datetime.timedelta(days=today.weekday())
+        elif preset == "Last 7 days":
+            since_date = today - datetime.timedelta(days=7)
+        else:
+            since_date = today - datetime.timedelta(days=1)
+        st.metric("Showing events since", str(since_date))
+
+    since_iso = f"{since_date}T00:00:00Z"
+    data = api_get("/api/changes", {"project_id": project_id, "since": since_iso})
+    if not data:
+        st.warning("Project not found.")
+        return
+
+    total = data.get("total_events", 0)
+    if total == 0:
+        st.info(f"No events found for **{project_name}** since {since_date}.")
+        return
+
+    summary = data.get("activity_summary", {})
+    by_source = summary.get("by_source", {})
+    by_kind = summary.get("by_kind", {})
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Events", total)
+    c2.metric("Sources", ", ".join(f"{k} ({v})" for k, v in by_source.items()))
+    c3.metric(
+        "Types", ", ".join(f"{kind_label(k)} ({v})" for k, v in by_kind.items())
+    )
+
+    sections = data.get("sections", {})
+    for key in ("newly_completed", "new_blockers", "new_decisions", "other_activity"):
+        items = sections.get(key, [])
+        if not items:
+            continue
+        label = SECTION_LABELS.get(key, key)
+        color = SECTION_COLORS.get(key, "#64748b")
+        st.markdown(
+            f"<h4 style='color:{color};'>{label}</h4>", unsafe_allow_html=True
+        )
+        for ev in items:
+            with st.container(border=True):
+                cols = st.columns([1, 3, 2])
+                with cols[0]:
+                    st.markdown(
+                        f"**{source_badge(ev['source_type'])}** · {kind_label(ev['event_kind'])}"
+                    )
+                with cols[1]:
+                    st.markdown(ev["text"])
+                with cols[2]:
+                    actor = ev.get("actor") or "Unknown"
+                    occurred = (ev.get("occurred_at") or "")[:16].replace("T", " ")
+                    st.caption(f"{actor} · {occurred}")
+                    link = ev.get("permalink")
+                    if link:
+                        st.markdown(f"[Open source ↗]({link})")
+
+
+def page_blockers(project_id: str, project_name: str):
+    st.header(f"Blockers — {project_name}")
+    st.caption(
+        "Automatically detected blockers from snapshots and event keyword signals."
+    )
+
+    pulse = api_get("/api/pulse", {"project_id": project_id})
+    snapshot_blockers = []
+    if pulse and pulse.get("sections"):
+        snapshot_blockers = pulse["sections"].get("blockers", [])
+
+    events_data = api_get("/api/events", {"project_id": project_id, "limit": 100})
+    event_blockers = []
+    if events_data:
+        kw = {"block", "waiting", "stuck", "dependency", "pending", "flaky"}
+        for ev in events_data.get("events", []):
+            if any(k in (ev.get("text") or "").lower() for k in kw):
+                event_blockers.append(ev)
+
+    total = len(snapshot_blockers) + len(event_blockers)
+    if total == 0:
+        st.success("No blockers detected. The project is clear!")
+        return
+
+    st.error(f"**{total}** potential blocker(s) detected")
+
+    if snapshot_blockers:
+        st.subheader("Confirmed Blockers (from latest snapshot)")
+        for b in snapshot_blockers:
+            with st.container(border=True):
+                cols = st.columns([4, 2])
+                with cols[0]:
+                    st.markdown(f"**{b['text']}**")
+                    for ev in b.get("evidence", []):
+                        icon = "Slack" if ev["source_type"] == "slack" else "Jira"
+                        st.caption(f"→ [{icon}]({ev['permalink']}) — _{ev['snippet']}_")
+                with cols[1]:
+                    owner = b.get("owner", "Unassigned")
+                    st.markdown(f"Owner: **{owner}**")
+
+    if event_blockers:
+        st.subheader("Blocker Signals (from event feed)")
+        for ev in event_blockers:
+            with st.container(border=True):
+                cols = st.columns([4, 2, 1])
+                with cols[0]:
+                    st.markdown(f"{source_badge(ev['source_type'])} {ev['text']}")
+                with cols[1]:
+                    st.caption(f"Mentioned by **{ev.get('actor', 'Unknown')}**")
+                with cols[2]:
+                    st.caption((ev.get("occurred_at") or "")[:10])
+
+
+def page_weekly_summary(project_id: str, project_name: str):
+    st.header(f"Weekly Summary — {project_name}")
+
+    today = datetime.date.today()
+    week_start = today - datetime.timedelta(days=today.weekday())
+    since_iso = f"{week_start}T00:00:00Z"
+
+    st.info(f"Summary for **{week_start}** to **{today}**")
+
+    changes = api_get("/api/changes", {"project_id": project_id, "since": since_iso})
+    pulse = api_get("/api/pulse", {"project_id": project_id})
+
+    sections_data = changes.get("sections", {}) if changes else {}
+    pulse_sections = pulse.get("sections", {}) if pulse else {}
+
+    shipped = sections_data.get("newly_completed", [])
+    blockers_list = sections_data.get("new_blockers", [])
+    decisions_list = sections_data.get("new_decisions", [])
+    other = sections_data.get("other_activity", [])
+
+    if not shipped and pulse_sections.get("progress"):
+        shipped = [
+            {"text": i["text"], "actor": i.get("owner", "")}
+            for i in pulse_sections["progress"]
+        ]
+    if not blockers_list and pulse_sections.get("blockers"):
+        blockers_list = [
+            {"text": i["text"], "actor": i.get("owner", "")}
+            for i in pulse_sections["blockers"]
+        ]
+    if not decisions_list and pulse_sections.get("decisions"):
+        decisions_list = [
+            {"text": i["text"], "actor": i.get("owner", "")}
+            for i in pulse_sections["decisions"]
+        ]
+
+    risks_list = []
+    if pulse_sections.get("risks"):
+        risks_list = [
+            {"text": i["text"], "actor": ""} for i in pulse_sections["risks"]
+        ]
+
+    st.markdown(
+        f"""
+        <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+                    padding: 28px; border-radius: 12px; margin-bottom: 24px;">
+            <h3 style="color:#f8fafc; margin:0 0 4px 0;">Week Summary — {project_name}</h3>
+            <p style="color:#94a3b8; margin:0;">{week_start} → {today}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    def _render_list(title: str, items: list, color: str):
+        st.markdown(f"<h4 style='color:{color};'>{title}</h4>", unsafe_allow_html=True)
+        if not items:
+            st.caption("None this week.")
+            return
+        for item in items:
+            text = item.get("text", str(item))
+            actor = item.get("actor") or item.get("owner", "")
+            suffix = f" — *{actor}*" if actor else ""
+            st.markdown(f"- {text}{suffix}")
+
+    _render_list("Shipped", shipped, "#10b981")
+    _render_list("In Progress", other, "#3b82f6")
+    _render_list("Blockers", blockers_list, "#ef4444")
+    _render_list("Decisions", decisions_list, "#6366f1")
+    _render_list("Risks", risks_list, "#f97316")
+
+    st.divider()
+
+    fig = go.Figure(
+        data=[
+            go.Bar(
+                x=["Shipped", "In Progress", "Blockers", "Decisions", "Risks"],
+                y=[
+                    len(shipped),
+                    len(other),
+                    len(blockers_list),
+                    len(decisions_list),
+                    len(risks_list),
+                ],
+                marker_color=["#10b981", "#3b82f6", "#ef4444", "#6366f1", "#f97316"],
+            )
+        ]
+    )
+    fig.update_layout(
+        title="Activity Breakdown",
+        yaxis_title="Count",
+        template="plotly_dark",
+        height=320,
+        margin={"l": 40, "r": 20, "t": 50, "b": 40},
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def page_ask(project_id: str, project_name: str):
+    st.header(f"Ask ProjectPulse — {project_name}")
+    st.caption(
+        "Ask natural-language questions about this project. "
+        "Answers are grounded in real project data from the API."
+    )
+
+    pulse = api_get("/api/pulse", {"project_id": project_id})
+    events_data = api_get("/api/events", {"project_id": project_id, "limit": 30})
+
+    status = pulse.get("sections", {}) if pulse else {}
+    headline = pulse.get("headline", "") if pulse else ""
+    events = events_data.get("events", []) if events_data else []
+
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    question = st.chat_input("e.g. What is the current status of the MVP?")
+    if not question:
+        st.markdown("**Try asking:**")
+        st.markdown("- *What is the current status?*")
+        st.markdown("- *Who is blocked and why?*")
+        st.markdown("- *What decisions were made this week?*")
+        st.markdown("- *What are the risks?*")
+        return
+
+    st.session_state.chat_history.append({"role": "user", "content": question})
+    with st.chat_message("user"):
+        st.markdown(question)
+
+    answer = _answer_question(question, headline, status, events, project_name)
+
+    st.session_state.chat_history.append({"role": "assistant", "content": answer})
+    with st.chat_message("assistant"):
+        st.markdown(answer)
+
+
+def _answer_question(
+    question: str, headline: str, sections: dict, events: list, project_name: str
+) -> str:
+    q = question.lower()
+
+    if any(kw in q for kw in ("status", "overview", "summary", "stand", "how is", "what's going")):
+        progress = sections.get("progress", [])
+        blockers = sections.get("blockers", [])
+        lines = [f"**{project_name} — Current Status**", ""]
+        if headline:
+            lines.append(f"> {headline}")
+            lines.append("")
+        if progress:
+            lines.append("**Progress:**")
+            for p in progress:
+                lines.append(f"- {p['text']} (Owner: {p.get('owner', 'N/A')})")
+        if blockers:
+            lines.append("\n**Blockers:**")
+            for b in blockers:
+                lines.append(f"- {b['text']} (Owner: {b.get('owner', 'N/A')})")
+        return "\n".join(lines)
+
+    if any(kw in q for kw in ("block", "stuck", "waiting", "impediment")):
+        blockers = sections.get("blockers", [])
+        if not blockers:
+            return f"No blockers currently reported for **{project_name}**."
+        lines = [f"**Active Blockers — {project_name}**", ""]
+        for b in blockers:
+            lines.append(f"- {b['text']} — Owner: **{b.get('owner', 'Unassigned')}**")
+            for ev in b.get("evidence", []):
+                lines.append(f"  → [{ev['source_type'].title()}]({ev['permalink']})")
+        return "\n".join(lines)
+
+    if any(kw in q for kw in ("decision", "decided", "chose", "selected")):
+        decisions = sections.get("decisions", [])
+        if not decisions:
+            return f"No decisions recorded this period for **{project_name}**."
+        lines = [f"**Decisions — {project_name}**", ""]
+        for d in decisions:
+            lines.append(f"- {d['text']} — {d.get('owner', '')}")
+        return "\n".join(lines)
+
+    if any(kw in q for kw in ("risk", "concern", "worry", "threat")):
+        risks = sections.get("risks", [])
+        if not risks:
+            return f"No risks flagged for **{project_name}**."
+        lines = [f"**Risks — {project_name}**", ""]
+        for r in risks:
+            lines.append(f"- {r['text']}")
+        return "\n".join(lines)
+
+    if any(kw in q for kw in ("next", "upcoming", "plan", "todo", "to do")):
+        ns = sections.get("next_steps", [])
+        if not ns:
+            return f"No next steps recorded for **{project_name}**."
+        lines = [f"**Next Steps — {project_name}**", ""]
+        for n in ns:
+            lines.append(f"- {n['text']} — Owner: **{n.get('owner', 'N/A')}**")
+        return "\n".join(lines)
+
+    if any(kw in q for kw in ("who", "people", "team", "contributor")):
+        actors = {ev.get("actor") for ev in events if ev.get("actor")}
+        if not actors:
+            return "No contributor information available."
+        lines = [f"**Contributors — {project_name}**", ""]
+        for a in sorted(actors):
+            lines.append(f"- {a}")
+        return "\n".join(lines)
+
+    if any(kw in q for kw in ("recent", "latest", "last", "activity", "event")):
+        if not events:
+            return "No recent activity found."
+        lines = [f"**Recent Activity — {project_name}**", ""]
+        for ev in events[:5]:
+            occurred = (ev.get("occurred_at") or "")[:16]
+            lines.append(
+                f"- [{ev['source_type'].upper()} · {kind_label(ev['event_kind'])}] "
+                f"{ev['text']} — *{ev.get('actor', '')}* ({occurred})"
+            )
+        return "\n".join(lines)
+
+    lines = [f"Here's what I know about **{project_name}**:", ""]
+    if headline:
+        lines.append(f"> {headline}")
+        lines.append("")
+    for key, label in SECTION_LABELS.items():
+        items = sections.get(key, [])
+        if items:
+            lines.append(f"**{label}:** " + "; ".join(i["text"] for i in items))
+
+    if events:
+        lines.append("\n**Recent events:**")
+        for ev in events[:3]:
+            lines.append(f"- {ev['text']} ({ev['source_type']} · {ev.get('actor', '')})")
+
+    return "\n".join(lines)
+
+
+# ── Main ─────────────────────────────────────────────────────────────
+
+
+def main():
+    st.set_page_config(
+        page_title="ProjectPulse AI",
+        page_icon="📊",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+    st.markdown(
+        """
+        <style>
+        .block-container { padding-top: 2rem; }
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
+        }
+        [data-testid="stSidebar"] * { color: #e2e8f0 !important; }
+        [data-testid="stSidebar"] .stSelectbox label,
+        [data-testid="stSidebar"] .stRadio label { color: #94a3b8 !important; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.sidebar:
+        st.markdown("## ProjectPulse AI")
+        st.caption("Real-time project intelligence")
+        st.divider()
+
+        data = api_get("/api/projects")
+        projects = data.get("projects", []) if data else []
+
+        if not projects:
+            st.warning("No active projects found.")
+            st.stop()
+
+        project_map = {p["name"]: p["project_id"] for p in projects}
+        selected_name = st.selectbox("Select Project", list(project_map.keys()))
+        selected_id = project_map[selected_name]
+
+        st.divider()
+
+        page = st.radio(
+            "Navigate",
+            [
+                "Overview",
+                "Changes",
+                "Blockers",
+                "Weekly Summary",
+                "Ask ProjectPulse",
+            ],
+            index=0,
+        )
+
+        st.divider()
+        st.caption(f"API: {API_BASE}")
+        st.caption("ProjectPulse AI · Hackathon 2026")
+
+    if page == "Overview":
+        page_overview(selected_id, selected_name)
+    elif page == "Changes":
+        page_changes(selected_id, selected_name)
+    elif page == "Blockers":
+        page_blockers(selected_id, selected_name)
+    elif page == "Weekly Summary":
+        page_weekly_summary(selected_id, selected_name)
+    elif page == "Ask ProjectPulse":
+        page_ask(selected_id, selected_name)
+
+
+if __name__ == "__main__":
+    main()
