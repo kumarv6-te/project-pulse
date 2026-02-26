@@ -620,6 +620,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5050)
     args = parser.parse_args()
-    app.run(debug=False, port=args.port)
+    app.run(host=args.host, debug=False, port=args.port)

@@ -64,8 +64,8 @@ This starts both services:
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| Flask API | http://127.0.0.1:5050 | REST API serving project data from SQLite |
-| MCP Server | http://127.0.0.1:8000/sse | LLM-facing tools over SSE, calls the Flask API |
+| Flask API | http://0.0.0.0:5050 | REST API serving project data from SQLite |
+| MCP Server | http://0.0.0.0:8000/sse | LLM-facing tools over SSE, calls the Flask API |
 
 Custom ports:
 
@@ -104,7 +104,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "projectpulse": {
-      "url": "http://127.0.0.1:8000/sse"
+      "url": "http://0.0.0.0:8000/sse"
     }
   }
 }
@@ -116,7 +116,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 npx @modelcontextprotocol/inspector
 ```
 
-Open http://localhost:6274, select **SSE** transport, connect to `http://127.0.0.1:8000/sse`.
+Open http://localhost:6274, select **SSE** transport, connect to `http://0.0.0.0:8000/sse`.
 
 ---
 
