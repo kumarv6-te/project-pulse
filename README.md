@@ -88,6 +88,30 @@ python run.py --flask-port 6000 --mcp-port 9000
 
 Press `Ctrl+C` to stop both services.
 
+### 6. Run the Streamlit Dashboard
+
+In a separate terminal (with the Flask API already running):
+
+```bash
+streamlit run app.py
+```
+
+Opens at http://localhost:8501. The dashboard calls the Flask API at `http://127.0.0.1:5050` by default. Override with:
+
+```bash
+PROJECTPULSE_API_URL=http://127.0.0.1:6000 streamlit run app.py
+```
+
+### Streamlit Dashboard Pages
+
+| Page | Description |
+|------|-------------|
+| **Overview** | Latest AI-generated snapshot with headline, progress, blockers, decisions, next steps, and risks — with evidence links |
+| **Changes** | Time-filtered activity feed ("What changed since Monday?") with source badges and event permalinks |
+| **Blockers** | Auto-detected blockers from snapshots and event signals with ownership attribution |
+| **Weekly Summary** | Structured weekly report (Shipped / In Progress / Blockers / Decisions / Risks) with activity chart |
+| **Ask ProjectPulse** | Natural-language Q&A grounded in real project data |
+
 ---
 
 ## Querying with natural language
@@ -188,6 +212,7 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://0.0.0.0
 | `create-db.py` | Creates empty database with schema only |
 | `API/app.py` | Flask REST API |
 | `mcp/server.py` | FastMCP server wrapping the Flask API |
+| `app.py` | Streamlit dashboard (calls Flask API) |
 
 ---
 
