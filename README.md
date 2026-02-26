@@ -56,7 +56,13 @@ For a full refresh including all child issues (e.g. CLOPS-1570, CLOPS-1571, CLOP
 python createdb-jira-bootstrap.py && FULL_REFRESH=1 DEBUG=1 python jira_ingest_from_db.py
 ```
 
-This creates `projectpulse_demo.db` (SQLite) and `projectpulse_schema.sql` in the project root with the full schema and sample data: projects (IncidentOps, CostOptimizer), events, attribution links, status snapshots, and convenience views.
+Generate status snapshots from ingested events:
+```bash
+python generate_status_snapshots.py
+```
+Use `WINDOW_DAYS=14` to include the last 2 weeks. Run `python run.py` to start the API and MCP server.
+
+This creates `projectpulse_demo.db` (SQLite) and `projectpulse_schema.sql` in the project root with the full schema and sample data: projects (IncidentOps, FedRamp coverage, Langfuse, Cloudability, Puppet migration), events, attribution links, status snapshots, and convenience views.
 
 ### 4. Set up MCP virtual environment (requires Python 3.10+)
 
@@ -132,6 +138,8 @@ A `.cursor/mcp.json` is included. After running `python run.py`, reload Cursor (
 - *"What is the current status of the MVP?"*
 - *"Are we on track for launch?"*
 - *"Summarise IncidentOps for the leadership meeting"*
+- *"What's the status of Puppet migration?"*
+- *"Show blockers for FedRamp coverage"*
 
 ### Claude Desktop
 
@@ -164,7 +172,6 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://0.0.0.0
 | GET | `/api/projects` | List all active projects |
 | GET | `/api/pulse?project_id=...` | Structured status pulse with evidence links |
 | GET | `/api/events?project_id=...` | Event feed (optional: `source_type`, `limit`, `offset`) |
-
 | GET | `/api/changes?project_id=...&since=...` | Delta changelog — newly completed, new blockers, new decisions, activity summary |
 | GET | `/api/blockers?project_id=...` | Active blockers with ownership, last activity, and source evidence |
 | GET | `/api/ask?project_id=...&question=...` | Full project context bundle for interactive Q&A (pulse, blockers, events, stats) |
@@ -193,6 +200,10 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://0.0.0.0
 | `createdb-insert-sample-data.py` | Creates the SQLite database, schema, and sample data |
 | `createdb-jira-bootstrap.py` | Creates minimal DB with projects + jira_epic scopes for Jira ingestion |
 | `jira_ingest_from_db.py` | Fetches Jira issues, comments, status changes into events (read-only) |
+| `generate_status_snapshots.py` | Synthesizes events into project_status_snapshots (progress, blockers, next_steps) |
+| `create-db.py` | Creates empty database with schema only |
+| `api/app.py` | Flask REST API |
+| `mcp/server.py` | FastMCP server wrapping the Flask API |
 
 ---
 
@@ -208,7 +219,26 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://0.0.0.0
 | `FULL_REFRESH` | No | `0` | If `1`, ignores `last_ingested_at` and fetches all issues in the epic |
 | `DEBUG` | No | `0` | If `1`, prints JQL queries and hit counts for troubleshooting |
 
+---
 
+## Snapshot generator options
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `DB_PATH` | `./projectpulse_demo.db` | Database path |
+| `WINDOW_DAYS` | `7` | Days of events to include in snapshot (use `14` for 2 weeks) |
+
+---
+
+## Use cases supported
+
+| Use case | Supported | How |
+|----------|----------|-----|
+| New project lead gets instant context | ✅ | `v_project_latest_snapshot` + `/api/pulse` |
+| What changed since Monday? | ✅ | `/api/changes?since=...` or filter `v_project_events` by `occurred_at` |
+| Blocker detection & ownership | ✅ | `status_json.blockers` with owner; `/api/blockers` |
+| Weekly status auto-generated | ✅ | `generate_status_snapshots.py` (run via cron) |
+| Ask ProjectPulse (interactive Q&A) | ✅ | `ask_project` MCP tool + `/api/ask` |
 | `create-db.py` | Creates empty database with schema only |
 | `API/app.py` | Flask REST API |
 | `mcp/server.py` | FastMCP server wrapping the Flask API |
@@ -218,7 +248,7 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://0.0.0.0
 
 ## Accessing the database with SQLite3
 
-After running `createdb-insert-sample-data.py`, you can inspect the database from the command line:
+After creating the database (via `createdb-insert-sample-data.py` or `createdb-jira-bootstrap.py` + `jira_ingest_from_db.py`), you can inspect it from the command line:
 
 ```bash
 # Open the database (from project root)
