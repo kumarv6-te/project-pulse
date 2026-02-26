@@ -1,3 +1,5 @@
 # ProjectPulse dependencies
 slack_sdk>=3.40.0
 requests>=2.28.0
+flask>=3.0.0
+fastmcp>=3.0.0
