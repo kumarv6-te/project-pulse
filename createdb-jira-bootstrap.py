@@ -35,7 +35,10 @@ def iso(dt: datetime.datetime) -> str:
 # Add more projects/epics as needed for your Jira
 JIRA_EPIC_SCOPES = [
     ("proj_incidentops", "IncidentOps", "Internal tooling for incident detection and response", "CLOPS-1447"),
-    # ("proj_costoptimizer", "CostOptimizer", "Reduce infra spend", "COST-123"),  # example
+    ("proj_fedramp_coverage", ">90% Coverage for Reservation in FedRamp Infrastructure", "FedRamp infrastructure reservation coverage", "CLOPS-1450"),
+    ("proj_langfuse_llm_cost", "Langfuse/Kuberan integration for accurate LLM cost", "Langfuse/Kuberan integration for accurate LLM cost", "CLOPS-1497"),
+    ("proj_cloudability_migration", "Cloudability Migration for ThousandEyes", "Cloudability Migration for ThousandEyes", "CLOPS-1452"),
+    ("proj_puppet_migration", "Puppet 7 to 8 migration", "Puppet 7 to 8 migration", "CLOPS-1369"),
 ]
 
 SCHEMA_SQL = """PRAGMA foreign_keys = ON;
