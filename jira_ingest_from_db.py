@@ -1,27 +1,37 @@
 #!/usr/bin/env python3
-"""
-ProjectPulse - Jira ingestion from DB scopes (SQLite)
+"""ProjectPulse - Jira ingestion from DB epic scopes (SQLite)
 
-What it does:
-- Reads jira_epic scopes from project_scopes table
-- For each epic:
-  - finds all issues in the epic (tries both company-managed and team-managed JQL)
-  - includes subtasks
-  - fetches comments + status transitions (from changelog)
-- Upserts into:
+Updated to ingest CHILD issue activity under each epic:
+- Finds all child issues for each epic scope (e.g., CLOPS-1447 includes CLOPS-1572)
+- For EACH child issue (and its subtasks):
+    - ingests ALL comments
+    - ingests changelog items (currently: status changes; extendable)
+
+Writes into SQLite tables:
   - events
   - event_project_links
+
+Deduping:
+- events are deduped by (source_type, source_ref) so re-running is safe.
 
 Requirements:
   pip install requests
 
 Env vars:
+  DB_PATH         default ./projectpulse_demo.db
   JIRA_BASE_URL   e.g. https://yourcompany.atlassian.net
   JIRA_EMAIL      your Atlassian login email
   JIRA_API_TOKEN  your API token
 
 Optional:
-  DB_PATH         default ./projectpulse_demo.db
+  INCREMENTAL=1   If set, uses project_checkpoints.last_ingested_at to limit the JQL to recently updated issues.
+                  Comments/status changes are still deduped, so this is safe and reduces API calls.
+  FULL_REFRESH=1  If set, ignores last_ingested_at and fetches all issues in the epic (use when child issues are missing).
+  DEBUG=1         Print JQL queries and hit counts to diagnose why child issues (e.g. CLOPS-1570) are not found.
+
+Notes:
+- Jira Cloud v3 comment bodies are ADF JSON. We convert to plain text for events.text
+  and store the raw comment in raw_json.
 """
 
 from __future__ import annotations
@@ -36,17 +46,17 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
 
 
-# -----------------------------
-# Config
-# -----------------------------
 DB_PATH = os.environ.get("DB_PATH", "./projectpulse_demo.db")
 JIRA_BASE_URL = os.environ["JIRA_BASE_URL"].rstrip("/")
 JIRA_EMAIL = os.environ["JIRA_EMAIL"]
 JIRA_API_TOKEN = os.environ["JIRA_API_TOKEN"]
+INCREMENTAL = os.environ.get("INCREMENTAL", "0") == "1"
+FULL_REFRESH = os.environ.get("FULL_REFRESH", "0") == "1"
+DEBUG = os.environ.get("DEBUG", "0") == "1"
 
 
 def now_iso() -> str:
-    return datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def adf_to_plain_text(adf: Any, max_len: int = 2000) -> str:
@@ -119,41 +129,40 @@ def jira_headers() -> Dict[str, str]:
 
 def jira_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     url = f"{JIRA_BASE_URL}{path}"
-    r = requests.get(url, headers=jira_headers(), params=params, timeout=30)
+    r = requests.get(url, headers=jira_headers(), params=params, timeout=45)
     r.raise_for_status()
     return r.json()
 
 
-# -----------------------------
-# Jira helpers
-# -----------------------------
-def jql_search(jql: str, fields: List[str], max_total: int = 500) -> List[Dict[str, Any]]:
-    """Jira /search pagination."""
+def jql_search(jql: str, fields: List[str], max_total: int = 1000) -> List[Dict[str, Any]]:
+    """
+    Search issues via JQL. Uses /rest/api/3/search/jql (legacy /search was removed).
+    Pagination uses nextPageToken instead of startAt.
+    """
     issues: List[Dict[str, Any]] = []
-    start_at = 0
+    next_page_token: Optional[str] = None
+
     while True:
-        data = jira_get(
-            "/rest/api/3/search",
-            params={
-                "jql": jql,
-                "fields": ",".join(fields),
-                "startAt": start_at,
-                "maxResults": 50,
-            },
-        )
+        params: Dict[str, Any] = {
+            "jql": jql,
+            "fields": ",".join(fields),
+            "maxResults": min(50, max_total - len(issues)),
+        }
+        if next_page_token:
+            params["nextPageToken"] = next_page_token
+
+        data = jira_get("/rest/api/3/search/jql", params=params)
         batch = data.get("issues", [])
         issues.extend(batch)
-        start_at += len(batch)
-        if len(batch) == 0 or start_at >= data.get("total", 0) or len(issues) >= max_total:
+        next_page_token = data.get("nextPageToken")
+
+        if len(batch) == 0 or not next_page_token or len(issues) >= max_total:
             break
+
     return issues[:max_total]
 
 
 def fetch_issue_with_changelog(issue_key: str) -> Dict[str, Any]:
-    """
-    Expand changelog to capture status transitions.
-    Note: changelog can be large; for hackathon demo this is ok on small sets.
-    """
     return jira_get(
         f"/rest/api/3/issue/{issue_key}",
         params={
@@ -163,7 +172,7 @@ def fetch_issue_with_changelog(issue_key: str) -> Dict[str, Any]:
     )
 
 
-def fetch_all_comments(issue_key: str, max_total: int = 500) -> List[Dict[str, Any]]:
+def fetch_all_comments(issue_key: str, max_total: int = 1000) -> List[Dict[str, Any]]:
     comments: List[Dict[str, Any]] = []
     start_at = 0
     while True:
@@ -179,26 +188,48 @@ def fetch_all_comments(issue_key: str, max_total: int = 500) -> List[Dict[str, A
     return comments[:max_total]
 
 
-def issues_in_epic(epic_key: str) -> List[Dict[str, Any]]:
-    """
-    Works across common Jira project types by trying both JQL forms:
-      - "Epic Link" = EPIC-KEY
-      - parentEpic = EPIC-KEY
-    """
+def _maybe_updated_clause(last_ingested_at: Optional[str]) -> str:
+    if FULL_REFRESH or not (INCREMENTAL and last_ingested_at):
+        return ""
+    try:
+        dt = datetime.datetime.fromisoformat(last_ingested_at.replace("Z", "+00:00"))
+        return f' AND updated >= "{dt.strftime("%Y-%m-%d %H:%M")}"'
+    except Exception:
+        return ""
+
+
+def issues_in_epic(epic_key: str, last_ingested_at: Optional[str]) -> List[Dict[str, Any]]:
+    """Find issues in an epic across common Jira project types."""
+    updated_clause = _maybe_updated_clause(last_ingested_at)
     fields = ["summary", "issuetype", "project", "subtasks", "updated"]
+
     all_issues: List[Dict[str, Any]] = []
     seen: Set[str] = set()
 
-    for jql in (f'"Epic Link" = {epic_key}', f"parentEpic = {epic_key}"):
+    jqls = [
+        f'"Epic Link" = {epic_key}{updated_clause}',  # company-managed epic link
+        f"parentEpic = {epic_key}{updated_clause}",   # team-managed
+        f"parent = {epic_key}{updated_clause}",       # parent link (child work items)
+    ]
+
+    for jql in jqls:
         try:
             hits = jql_search(jql, fields=fields)
-        except requests.HTTPError:
+            if DEBUG:
+                keys = [i.get("key") for i in hits if i.get("key")]
+                print(f"  JQL: {jql[:80]}... -> {len(hits)} hits: {keys[:10]}{'...' if len(keys) > 10 else ''}")
+        except requests.HTTPError as e:
+            if DEBUG:
+                print(f"  JQL failed: {jql[:60]}... -> {e.response.status_code} {e.response.text[:200]}")
             hits = []
         for issue in hits:
             key = issue.get("key")
             if key and key not in seen:
                 seen.add(key)
                 all_issues.append(issue)
+
+    if DEBUG and all_issues:
+        print(f"  Total issues found: {sorted(i.get('key') for i in all_issues if i.get('key'))}")
 
     return all_issues
 
@@ -214,9 +245,6 @@ def db_connect(path: str) -> sqlite3.Connection:
 
 
 def get_epic_scopes(conn: sqlite3.Connection) -> List[Tuple[str, str]]:
-    """
-    Returns [(project_id, epic_key), ...] from project_scopes.
-    """
     rows = conn.execute(
         """
         SELECT project_id, scope_value
@@ -225,6 +253,25 @@ def get_epic_scopes(conn: sqlite3.Connection) -> List[Tuple[str, str]]:
         """
     ).fetchall()
     return [(r["project_id"], r["scope_value"]) for r in rows]
+
+
+def get_last_ingested_at(conn: sqlite3.Connection, project_id: str) -> Optional[str]:
+    r = conn.execute(
+        "SELECT last_ingested_at FROM project_checkpoints WHERE project_id=?",
+        (project_id,),
+    ).fetchone()
+    return r["last_ingested_at"] if r else None
+
+
+def set_last_ingested_at(conn: sqlite3.Connection, project_id: str, ts: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO project_checkpoints(project_id, last_ingested_at)
+        VALUES (?, ?)
+        ON CONFLICT(project_id) DO UPDATE SET last_ingested_at=excluded.last_ingested_at
+        """,
+        (project_id, ts),
+    )
 
 
 def event_exists(conn: sqlite3.Connection, source_type: str, source_ref: str) -> bool:
@@ -301,8 +348,6 @@ def link_event_to_project(
 
 
 def make_event_id(prefix: str, source_ref: str) -> str:
-    # Deterministic-ish ID so duplicates aren't created across runs
-    # (events table uniqueness is source_type+source_ref, but we also need event_id unique)
     safe = source_ref.replace(":", "_").replace("/", "_")
     return f"{prefix}_{safe}"[:120]
 
@@ -310,87 +355,124 @@ def make_event_id(prefix: str, source_ref: str) -> str:
 # -----------------------------
 # Ingestion logic
 # -----------------------------
-def ingest_epic(conn: sqlite3.Connection, project_id: str, epic_key: str) -> Dict[str, int]:
-    """
-    Fetches epic issues + activities and writes them into DB.
-    Returns counters for logging.
-    """
-    counters = {"issues": 0, "comments": 0, "status_changes": 0, "skipped_existing": 0}
-    ingested_at = now_iso()
+def ingest_issue_activity(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    epic_key: str,
+    issue_key: str,
+    ingested_at: str,
+) -> Dict[str, int]:
+    counters = {"comments": 0, "status_changes": 0, "skipped_existing": 0}
 
-    # Issues in epic
-    base_issues = issues_in_epic(epic_key)
-    issue_keys: Set[str] = {i["key"] for i in base_issues if i.get("key")}
+    issue = fetch_issue_with_changelog(issue_key)
+    fields = issue.get("fields", {}) or {}
 
-    # Include subtasks from search results (cheap win)
-    for i in base_issues:
-        subs = (i.get("fields", {}) or {}).get("subtasks", []) or []
-        for st in subs:
-            if st.get("key"):
-                issue_keys.add(st["key"])
+    proj = fields.get("project") or {}
+    jira_project_key = proj.get("key")
+    jira_project_name = proj.get("name")
 
-    # Include the epic itself
-    issue_keys.add(epic_key)
+    issue_url = f"{JIRA_BASE_URL}/browse/{issue_key}"
 
-    for issue_key in sorted(issue_keys):
-        counters["issues"] += 1
+    # Comments
+    try:
+        comments = fetch_all_comments(issue_key)
+    except requests.HTTPError:
+        comments = []
 
-        issue = fetch_issue_with_changelog(issue_key)
-        fields = issue.get("fields", {}) or {}
+    for c in comments:
+        comment_id = c.get("id")
+        if not comment_id:
+            continue
 
-        proj = fields.get("project") or {}
-        jira_project_key = proj.get("key")
-        jira_project_name = proj.get("name")
+        source_ref = f"{issue_key}:comment:{comment_id}"
+        if event_exists(conn, "jira", source_ref):
+            counters["skipped_existing"] += 1
+            continue
 
-        issue_url = f"{JIRA_BASE_URL}/browse/{issue_key}"
+        created = c.get("created") or ingested_at
+        author = c.get("author") or {}
+        author_id = author.get("accountId")
+        author_name = author.get("displayName")
 
-        # ---- Comments -> events(comment) ----
-        try:
-            comments = fetch_all_comments(issue_key)
-        except requests.HTTPError:
-            comments = []
+        # Jira Cloud v3 comment body is ADF JSON. Extract plain text for events.text.
+        body = c.get("body")
+        plain = adf_to_plain_text(body) if body else ""
+        text = (
+            f"{issue_key} comment by {author_name}: {plain}"
+            if plain
+            else f"{issue_key} comment by {author_name}: (no text)"
+        )
 
-        for c in comments:
-            comment_id = c.get("id")
-            if not comment_id:
+        event_id = make_event_id("jira", source_ref)
+        insert_event(
+            conn,
+            event_id=event_id,
+            source_type="jira",
+            source_ref=source_ref,
+            occurred_at=created,
+            ingested_at=ingested_at,
+            container_id=jira_project_key,
+            container_name=jira_project_name,
+            actor_id=author_id,
+            actor_display=author_name,
+            event_kind="comment",
+            title=f"{issue_key} comment",
+            text=text,
+            permalink=issue_url,
+            raw_obj={"issueKey": issue_key, "comment": c},
+        )
+        link_event_to_project(
+            conn,
+            event_id=event_id,
+            project_id=project_id,
+            attribution_type="scope_rule",
+            confidence=1.0,
+            rationale=f"Issue belongs to epic {epic_key} (jira_epic scope)",
+            created_at=ingested_at,
+        )
+        counters["comments"] += 1
+
+    # Status changes from changelog
+    changelog = issue.get("changelog") or {}
+    histories = changelog.get("histories") or []
+    for h in histories:
+        history_id = h.get("id")
+        created = h.get("created")
+        items = h.get("items") or []
+        author = h.get("author") or {}
+        author_id = author.get("accountId")
+        author_name = author.get("displayName")
+
+        for idx, it in enumerate(items):
+            if (it.get("field") or "").lower() != "status":
                 continue
 
-            source_ref = f"{issue_key}:comment:{comment_id}"
+            from_s = it.get("fromString")
+            to_s = it.get("toString")
+            source_ref = f"{issue_key}:status:{history_id}:{idx}"
             if event_exists(conn, "jira", source_ref):
                 counters["skipped_existing"] += 1
                 continue
 
-            created = c.get("created") or ingested_at
-            author = c.get("author") or {}
-            author_id = author.get("accountId")
-            author_name = author.get("displayName")
-
-            # Jira Cloud v3 comment body is ADF JSON. Extract plain text for events.text.
-            body = c.get("body")
-            plain = adf_to_plain_text(body) if body else ""
-            text = (
-                f"{issue_key} comment by {author_name}: {plain}"
-                if plain
-                else f"{issue_key} comment by {author_name}: (no text)"
-            )
-
+            text = f"{issue_key} status changed: {from_s} → {to_s}"
             event_id = make_event_id("jira", source_ref)
             insert_event(
                 conn,
                 event_id=event_id,
                 source_type="jira",
                 source_ref=source_ref,
-                occurred_at=created,
+                occurred_at=created or ingested_at,
                 ingested_at=ingested_at,
                 container_id=jira_project_key,
                 container_name=jira_project_name,
                 actor_id=author_id,
                 actor_display=author_name,
-                event_kind="comment",
-                title=f"{issue_key} comment",
+                event_kind="status_change",
+                title=f"{issue_key} status",
                 text=text,
                 permalink=issue_url,
-                raw_obj={"issueKey": issue_key, "comment": c},
+                raw_obj={"issueKey": issue_key, "history": h, "item": it},
             )
             link_event_to_project(
                 conn,
@@ -401,60 +483,68 @@ def ingest_epic(conn: sqlite3.Connection, project_id: str, epic_key: str) -> Dic
                 rationale=f"Issue belongs to epic {epic_key} (jira_epic scope)",
                 created_at=ingested_at,
             )
-            counters["comments"] += 1
+            counters["status_changes"] += 1
 
-        # ---- Status changes from changelog -> events(status_change) ----
-        changelog = issue.get("changelog") or {}
-        histories = changelog.get("histories") or []
-        for h in histories:
-            history_id = h.get("id")
-            created = h.get("created")
-            items = h.get("items") or []
-            author = h.get("author") or {}
-            author_id = author.get("accountId")
-            author_name = author.get("displayName")
+    return counters
 
-            for idx, it in enumerate(items):
-                if (it.get("field") or "").lower() != "status":
-                    continue
 
-                from_s = it.get("fromString")
-                to_s = it.get("toString")
-                source_ref = f"{issue_key}:status:{history_id}:{idx}"
-                if event_exists(conn, "jira", source_ref):
-                    counters["skipped_existing"] += 1
-                    continue
+def ingest_epic(conn: sqlite3.Connection, project_id: str, epic_key: str) -> Dict[str, int]:
+    counters = {"issues_touched": 0, "comments": 0, "status_changes": 0, "skipped_existing": 0}
+    ingested_at = now_iso()
 
-                text = f"{issue_key} status changed: {from_s} → {to_s}"
-                event_id = make_event_id("jira", source_ref)
-                insert_event(
-                    conn,
-                    event_id=event_id,
-                    source_type="jira",
-                    source_ref=source_ref,
-                    occurred_at=created or ingested_at,
-                    ingested_at=ingested_at,
-                    container_id=jira_project_key,
-                    container_name=jira_project_name,
-                    actor_id=author_id,
-                    actor_display=author_name,
-                    event_kind="status_change",
-                    title=f"{issue_key} status",
-                    text=text,
-                    permalink=issue_url,
-                    raw_obj={"issueKey": issue_key, "history": h, "item": it},
-                )
-                link_event_to_project(
-                    conn,
-                    event_id=event_id,
-                    project_id=project_id,
-                    attribution_type="scope_rule",
-                    confidence=1.0,
-                    rationale=f"Issue belongs to epic {epic_key} (jira_epic scope)",
-                    created_at=ingested_at,
-                )
-                counters["status_changes"] += 1
+    last_ingested_at = get_last_ingested_at(conn, project_id)
+    if DEBUG:
+        print(f"  last_ingested_at: {last_ingested_at}, INCREMENTAL: {INCREMENTAL}, FULL_REFRESH: {FULL_REFRESH}")
 
+    # Find child issues in epic (CLOPS-1447 -> CLOPS-1572 etc.)
+    if DEBUG:
+        print(f"  Running JQL to find issues in epic {epic_key}:")
+    base_issues = issues_in_epic(epic_key, last_ingested_at)
+    issue_keys: Set[str] = {i["key"] for i in base_issues if i.get("key")}
+
+    # Include subtasks from the search results
+    for i in base_issues:
+        subs = (i.get("fields", {}) or {}).get("subtasks", []) or []
+        for st in subs:
+            if st.get("key"):
+                issue_keys.add(st["key"])
+
+    # Include the epic itself
+    issue_keys.add(epic_key)
+
+    processed: Set[str] = set()
+    while True:
+        pending = sorted(issue_keys - processed)
+        if not pending:
+            break
+
+        for issue_key in pending:
+            processed.add(issue_key)
+            counters["issues_touched"] += 1
+
+            c = ingest_issue_activity(
+                conn,
+                project_id=project_id,
+                epic_key=epic_key,
+                issue_key=issue_key,
+                ingested_at=ingested_at,
+            )
+            counters["comments"] += c["comments"]
+            counters["status_changes"] += c["status_changes"]
+            counters["skipped_existing"] += c["skipped_existing"]
+
+            # Discover subtasks from full issue fetch
+            try:
+                issue_full = fetch_issue_with_changelog(issue_key)
+                subs2 = ((issue_full.get("fields") or {}).get("subtasks") or [])
+                for st in subs2:
+                    k = st.get("key")
+                    if k:
+                        issue_keys.add(k)
+            except Exception:
+                pass
+
+    set_last_ingested_at(conn, project_id, ingested_at)
     return counters
 
 
@@ -466,30 +556,38 @@ def main() -> None:
         return
 
     print(f"DB: {DB_PATH}")
-    print(f"Found {len(scopes)} jira_epic scopes.\n")
+    print(f"Found {len(scopes)} jira_epic scopes.")
+    if INCREMENTAL:
+        print("INCREMENTAL=1 -> limiting JQL by project_checkpoints.last_ingested_at (safe; still dedupes).")
+    if FULL_REFRESH:
+        print("FULL_REFRESH=1 -> fetching all issues (ignoring last_ingested_at).")
+    if DEBUG:
+        print("DEBUG=1 -> printing JQL and hit counts.")
+    print()
 
-    total = {"issues": 0, "comments": 0, "status_changes": 0, "skipped_existing": 0}
+    total = {"issues_touched": 0, "comments": 0, "status_changes": 0, "skipped_existing": 0}
 
     for project_id, epic_key in scopes:
-        print(f"== Ingesting Jira epic {epic_key} for project {project_id} ==")
+        print(f"== Ingesting epic {epic_key} for project {project_id} ==")
         counters = ingest_epic(conn, project_id, epic_key)
         conn.commit()
         print(
-            f"  issues: {counters['issues']}, "
-            f"comments: {counters['comments']}, "
-            f"status_changes: {counters['status_changes']}, "
-            f"skipped_existing: {counters['skipped_existing']}\n"
+            f"  issues_touched: {counters['issues_touched']}\n"
+            f"  new comments:   {counters['comments']}\n"
+            f"  new statuses:   {counters['status_changes']}\n"
+            f"  skipped:        {counters['skipped_existing']}"
         )
         for k in total:
             total[k] += counters[k]
 
     print("== Done ==")
     print(
-        f"Total issues touched: {total['issues']}\n"
-        f"Total new comments: {total['comments']}\n"
-        f"Total new status changes: {total['status_changes']}\n"
-        f"Total skipped (already in DB): {total['skipped_existing']}"
+        f"Total issues touched: {total['issues_touched']}\n"
+        f"Total new comments:   {total['comments']}\n"
+        f"Total new statuses:   {total['status_changes']}\n"
+        f"Total skipped:        {total['skipped_existing']}"
     )
+
     conn.close()
 
 
