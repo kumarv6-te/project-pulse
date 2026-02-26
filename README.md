@@ -57,6 +57,52 @@ This creates `projectpulse_demo.db` (SQLite) and `projectpulse_schema.sql` in th
 
 ---
 
+## Accessing the database with SQLite3
+
+After running `createdb-insert-sample-data.py`, you can inspect the database from the command line:
+
+```bash
+# Open the database (from project root)
+sqlite3 projectpulse_demo.db
+```
+
+Useful commands inside the `sqlite3` shell:
+
+```sql
+-- List all tables
+.tables
+
+-- Show schema for a table
+.schema projects
+
+-- List projects
+SELECT project_id, name, description FROM projects;
+
+-- List events with project attribution (convenience view)
+SELECT project_id, event_kind, actor_display, title, text
+FROM v_project_events
+ORDER BY occurred_at;
+
+-- Events for a specific project (e.g. IncidentOps)
+SELECT event_kind, actor_display, text, occurred_at
+FROM v_project_events
+WHERE project_id = 'proj_incidentops'
+ORDER BY occurred_at;
+
+-- Latest status snapshot per project
+SELECT project_id, snapshot_at, status_json
+FROM v_project_latest_snapshot;
+
+-- Project scopes (Slack channels, Jira epics)
+SELECT p.name, ps.source_type, ps.scope_kind, ps.scope_value
+FROM projects p
+JOIN project_scopes ps ON ps.project_id = p.project_id;
+```
+
+Exit the shell with `.quit` or `Ctrl+D`.
+
+---
+
 ## Database schema
 
 - **projects** / **project_scopes** – Projects and their Slack/Jira scopes
