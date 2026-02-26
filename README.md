@@ -37,13 +37,13 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 3. Create database schema
+### 3. Create database and sample data
 
 ```bash
-python create-db.py
+python createdb-insert-sample-data.py
 ```
 
-This creates `projectpulse.db` (SQLite) in the project root with the full schema: projects, scopes, events, attribution links, status snapshots, and convenience views.
+This creates `projectpulse_demo.db` (SQLite) and `projectpulse_schema.sql` in the project root with the full schema and sample data: projects (IncidentOps, CostOptimizer), events, attribution links, status snapshots, and convenience views.
 
 ---
 
@@ -51,8 +51,7 @@ This creates `projectpulse.db` (SQLite) in the project root with the full schema
 
 | Script | Description |
 |--------|--------------|
-| `create-db.py` | Creates the local SQLite database and schema |
-| `insert-sample-data.py` | Inserts sample data for development |
+| `createdb-insert-sample-data.py` | Creates the SQLite database, schema, and sample data |
 
 
 
