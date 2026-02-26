@@ -220,6 +220,104 @@ def project_events():
     })
 
 
+# ---------- GET /api/changes?project_id=...&since=... ----------
+
+_BLOCKER_KEYWORDS = {"block", "waiting", "stuck", "flaky", "regression", "fail", "broken", "down"}
+_DECISION_KEYWORDS = {"decision", "decided", "adopt", "switch", "selected", "chose", "agreed"}
+_COMPLETION_KEYWORDS = {"done", "completed", "merged", "resolved", "shipped", "closed"}
+
+
+def _classify_event(row):
+    text_lower = (row["text"] or "").lower()
+    kind = row["event_kind"]
+
+    if kind == "status_change" and any(kw in text_lower for kw in _COMPLETION_KEYWORDS):
+        return "newly_completed"
+    if any(kw in text_lower for kw in _BLOCKER_KEYWORDS):
+        return "new_blockers"
+    if any(kw in text_lower for kw in _DECISION_KEYWORDS):
+        return "new_decisions"
+    return "other_activity"
+
+
+def _event_to_dict(r):
+    return {
+        "event_id": r["event_id"],
+        "source_type": r["source_type"],
+        "occurred_at": r["occurred_at"],
+        "container_name": r["container_name"],
+        "actor": r["actor_display"],
+        "event_kind": r["event_kind"],
+        "title": r["title"],
+        "text": r["text"],
+        "permalink": r["permalink"],
+        "attribution": {
+            "type": r["attribution_type"],
+            "confidence": r["confidence"],
+        },
+    }
+
+
+@app.route("/api/changes", methods=["GET"])
+def project_changes():
+    db = get_db()
+    project_id = request.args.get("project_id")
+    since = request.args.get("since")
+
+    if not project_id:
+        return jsonify({"error": "Missing required query parameter: project_id"}), 400
+    if not since:
+        return jsonify({"error": "Missing required query parameter: since (ISO-8601)"}), 400
+
+    project = db.execute(
+        "SELECT project_id, name FROM projects WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()
+
+    if project is None:
+        return jsonify({"error": "Project not found", "project_id": project_id}), 404
+
+    rows = db.execute(
+        """SELECT event_id, source_type, occurred_at, container_name,
+                  actor_display, event_kind, title, text, permalink,
+                  attribution_type, confidence
+           FROM v_project_events
+           WHERE project_id = ? AND occurred_at >= ?
+           ORDER BY occurred_at DESC""",
+        (project_id, since),
+    ).fetchall()
+
+    buckets = {
+        "newly_completed": [],
+        "new_blockers": [],
+        "new_decisions": [],
+        "other_activity": [],
+    }
+    by_source = {}
+    by_kind = {}
+
+    for r in rows:
+        category = _classify_event(r)
+        buckets[category].append(_event_to_dict(r))
+        src = r["source_type"]
+        by_source[src] = by_source.get(src, 0) + 1
+        ek = r["event_kind"]
+        by_kind[ek] = by_kind.get(ek, 0) + 1
+
+    return jsonify({
+        "project_id": project_id,
+        "project_name": project["name"],
+        "since": since,
+        "total_events": len(rows),
+        "sections": {k: v for k, v in buckets.items() if v},
+        "activity_summary": {
+            "total": len(rows),
+            "by_source": by_source,
+            "by_kind": by_kind,
+        },
+    })
+
+
 # ---------- Health ----------
 
 @app.route("/api/health", methods=["GET"])
