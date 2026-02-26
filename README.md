@@ -89,6 +89,9 @@ A `.cursor/mcp.json` is included. After running `python run.py`, reload Cursor (
 - *"What Jira updates happened recently?"*
 - *"What changed on IncidentOps since Monday?"*
 - *"Catch me up on what I missed this week"*
+- *"What are the blockers on IncidentOps?"*
+- *"Is anything stuck or blocked?"*
+- *"Show me blockers and who owns them"*
 
 ### Claude Desktop
 
@@ -121,7 +124,9 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://127.0.0
 | GET | `/api/projects` | List all active projects |
 | GET | `/api/pulse?project_id=...` | Structured status pulse with evidence links |
 | GET | `/api/events?project_id=...` | Event feed (optional: `source_type`, `limit`, `offset`) |
+
 | GET | `/api/changes?project_id=...&since=...` | Delta changelog — newly completed, new blockers, new decisions, activity summary |
+| GET | `/api/blockers?project_id=...` | Active blockers with ownership, last activity, and source evidence |
 | GET | `/api/health` | Health check |
 
 ---
@@ -134,6 +139,7 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://127.0.0
 | `get_project_pulse` | `project_id` | Status summary with progress, blockers, decisions, risks |
 | `get_project_events` | `project_id`, `source_type?`, `limit?` | Raw event feed from Slack and Jira |
 | `get_project_changes` | `project_id`, `since` | Delta changelog — what changed since a given date |
+| `get_project_blockers` | `project_id` | Active blockers with ownership, last activity, and evidence links |
 
 ---
 

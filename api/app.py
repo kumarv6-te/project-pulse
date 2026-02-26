@@ -220,6 +220,7 @@ def project_events():
     })
 
 
+
 # ---------- GET /api/changes?project_id=...&since=... ----------
 
 _BLOCKER_KEYWORDS = {"block", "waiting", "stuck", "flaky", "regression", "fail", "broken", "down"}
@@ -315,6 +316,130 @@ def project_changes():
             "by_source": by_source,
             "by_kind": by_kind,
         },
+    })
+
+
+# ---------- GET /api/blockers?project_id=... ----------
+
+_BLOCKER_DETECT_KEYWORDS = {
+    "block", "blocked", "blocking", "waiting", "stuck", "flaky",
+    "regression", "fail", "failed", "broken", "down", "pending",
+    "unresolved", "investigate", "investigating",
+}
+
+
+def _is_blocker_event(row):
+    text_lower = (row["text"] or "").lower()
+    kind = row["event_kind"]
+    if kind == "status_change" and "block" in text_lower:
+        return True
+    return any(kw in text_lower for kw in _BLOCKER_DETECT_KEYWORDS)
+
+
+@app.route("/api/blockers", methods=["GET"])
+def project_blockers():
+    db = get_db()
+    project_id = request.args.get("project_id")
+
+    if not project_id:
+        return jsonify({"error": "Missing required query parameter: project_id"}), 400
+
+    project = db.execute(
+        "SELECT project_id, name FROM projects WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()
+
+    if project is None:
+        return jsonify({"error": "Project not found", "project_id": project_id}), 404
+
+    snapshot = db.execute(
+        "SELECT * FROM v_project_latest_snapshot WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()
+
+    snapshot_blockers = []
+    if snapshot:
+        status = json.loads(snapshot["status_json"])
+        for item in status.get("blockers", []):
+            evidence_events = []
+            for eid in item.get("event_ids", []):
+                ev = db.execute(
+                    """SELECT event_id, source_type, occurred_at, actor_display,
+                              text, permalink, container_name
+                       FROM events WHERE event_id = ?""",
+                    (eid,),
+                ).fetchone()
+                if ev:
+                    evidence_events.append({
+                        "event_id": ev["event_id"],
+                        "source_type": ev["source_type"],
+                        "occurred_at": ev["occurred_at"],
+                        "actor": ev["actor_display"],
+                        "text": ev["text"],
+                        "permalink": ev["permalink"],
+                        "container_name": ev["container_name"],
+                    })
+
+            last_activity = max(
+                (e["occurred_at"] for e in evidence_events), default=None
+            )
+            snapshot_blockers.append({
+                "summary": item["text"],
+                "owner": item.get("owner"),
+                "source": "snapshot",
+                "last_activity": last_activity,
+                "evidence": evidence_events,
+            })
+
+    seen_event_ids = {
+        eid
+        for b in snapshot_blockers
+        for e in b["evidence"]
+        for eid in [e["event_id"]]
+    }
+
+    rows = db.execute(
+        """SELECT event_id, source_type, occurred_at, container_name,
+                  actor_display, event_kind, title, text, permalink,
+                  attribution_type, confidence
+           FROM v_project_events
+           WHERE project_id = ?
+           ORDER BY occurred_at DESC""",
+        (project_id,),
+    ).fetchall()
+
+    detected_blockers = []
+    for r in rows:
+        if r["event_id"] in seen_event_ids:
+            continue
+        if not _is_blocker_event(r):
+            continue
+        detected_blockers.append({
+            "summary": r["text"],
+            "owner": r["actor_display"],
+            "source": r["source_type"],
+            "last_activity": r["occurred_at"],
+            "evidence": [{
+                "event_id": r["event_id"],
+                "source_type": r["source_type"],
+                "occurred_at": r["occurred_at"],
+                "actor": r["actor_display"],
+                "text": r["text"],
+                "permalink": r["permalink"],
+                "container_name": r["container_name"],
+            }],
+        })
+
+    all_blockers = snapshot_blockers + detected_blockers
+    all_blockers.sort(
+        key=lambda b: b.get("last_activity") or "", reverse=True
+    )
+
+    return jsonify({
+        "project_id": project_id,
+        "project_name": project["name"],
+        "total_blockers": len(all_blockers),
+        "blockers": all_blockers,
     })
 
 

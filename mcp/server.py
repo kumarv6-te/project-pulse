@@ -259,6 +259,57 @@ def get_project_changes(
     return "\n".join(lines)
 
 
+@mcp.tool()
+def get_project_blockers(project_id: str) -> str:
+    """Get all active blockers for a project with ownership and evidence.
+    Combines snapshot-declared blockers with auto-detected blockers from
+    recent Slack messages and Jira updates.
+
+    Use this tool when the user asks:
+    - "What are the blockers on <project>?"
+    - "Is anything blocked?"
+    - "Show me blockers and who owns them"
+    - "What's stuck?"
+    - "Are there any issues holding up <project>?"
+
+    Each blocker shows owner, last activity time, and source evidence
+    (Slack permalink or Jira link).
+
+    Args:
+        project_id: The project identifier (e.g. "proj_incidentops").
+                    Use list_projects first if you don't know the ID.
+    """
+    try:
+        data = _api_get("/api/blockers", params={"project_id": project_id})
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            return f"Project `{project_id}` not found. Use list_projects to see available projects."
+        raise
+
+    blockers = data.get("blockers", [])
+    if not blockers:
+        return f"No active blockers found for **{data.get('project_name', project_id)}**."
+
+    lines = [
+        f"# {data['project_name']} — Active Blockers ({data['total_blockers']})\n",
+    ]
+
+    for i, b in enumerate(blockers, 1):
+        owner = b.get("owner") or "Unassigned"
+        last = b.get("last_activity") or "Unknown"
+        lines.append(f"### {i}. {b['summary']}")
+        lines.append(f"- **Owner:** {owner}")
+        lines.append(f"- **Last activity:** {last}")
+
+        for ev in b.get("evidence", []):
+            icon = "Slack" if ev["source_type"] == "slack" else "Jira"
+            lines.append(f"- **Source:** [{icon} — {ev['actor']}]({ev['permalink']})")
+            lines.append(f"  _{ev['text']}_")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def run_mcp(transport: str = "sse", host: str = "127.0.0.1", port: int = 8000):
     mcp.run(transport=transport, host=host, port=port)
 
