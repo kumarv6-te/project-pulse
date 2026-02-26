@@ -310,6 +310,126 @@ def get_project_blockers(project_id: str) -> str:
     return "\n".join(lines)
 
 
+@mcp.tool()
+def ask_project(project_id: str, question: str) -> str:
+    """Answer any free-form question about a project using real data.
+    This is the most powerful tool — it retrieves the full project
+    context (status pulse, blockers, recent activity, statistics) and
+    returns it as a grounded briefing so you can answer the user's
+    question with citations.
+
+    Use this tool when the user asks ANY open-ended question about a
+    project that isn't covered by the more specific tools, such as:
+    - "What is the current status of the MVP?"
+    - "How is <project> going?"
+    - "Are we on track for launch?"
+    - "Summarise <project> for the leadership meeting"
+    - "What should I be worried about on <project>?"
+    - "Give me the TL;DR on <project>"
+    - "How many stories are done?"
+    - "What risks exist?"
+
+    The returned context is grounded in real Slack and Jira data.
+    Cite the evidence links (Slack permalinks / Jira URLs) in your
+    answer so the user can verify every claim.
+
+    Args:
+        project_id: The project identifier (e.g. "proj_incidentops").
+                    Use list_projects first if you don't know the ID.
+        question: The user's question, in their own words.
+    """
+    try:
+        data = _api_get("/api/ask", params={
+            "project_id": project_id,
+            "question": question,
+        })
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            return f"Project `{project_id}` not found. Use list_projects to see available projects."
+        raise
+
+    lines = [
+        f"# {data['project_name']} — Project Intelligence Briefing",
+        f"_{data.get('project_description', '')}_\n",
+        f"**User question:** {data.get('question', 'N/A')}\n",
+        "Use the context below to answer. Cite evidence links.\n",
+    ]
+
+    # -- Pulse snapshot ----------------------------------------------------
+    pulse = data.get("pulse")
+    if pulse:
+        lines.append(f"## Status Pulse (as of {pulse['snapshot_at']})")
+        lines.append(
+            f"*Window: {pulse['window']['start']} → {pulse['window']['end']}*\n"
+        )
+        if pulse.get("headline"):
+            lines.append(f"**{pulse['headline']}**\n")
+
+        section_labels = {
+            "progress": "Progress",
+            "blockers": "Blockers",
+            "decisions": "Decisions",
+            "next_steps": "Upcoming / Next Steps",
+            "risks": "Risks",
+        }
+        for key, label in section_labels.items():
+            items = pulse.get("sections", {}).get(key, [])
+            if not items:
+                continue
+            lines.append(f"### {label}")
+            for item in items:
+                owner = f" (Owner: {item['owner']})" if item.get("owner") else ""
+                lines.append(f"- {item['text']}{owner}")
+                for ev in item.get("evidence", []):
+                    icon = "Slack" if ev["source_type"] == "slack" else "Jira"
+                    lines.append(
+                        f"  → [{icon}]({ev['permalink']}) — _{ev['snippet']}_"
+                    )
+            lines.append("")
+    else:
+        lines.append("## Status Pulse\n_No snapshot available._\n")
+
+    # -- Blockers ----------------------------------------------------------
+    blockers = data.get("blockers", [])
+    if blockers:
+        lines.append(f"## Active Blockers ({len(blockers)})")
+        for i, b in enumerate(blockers, 1):
+            owner = b.get("owner") or "Unassigned"
+            lines.append(f"{i}. **{b['summary']}** (Owner: {owner})")
+            for ev in b.get("evidence", []):
+                icon = "Slack" if ev["source_type"] == "slack" else "Jira"
+                lines.append(f"   → [{icon}]({ev['permalink']}) — _{ev['text']}_")
+        lines.append("")
+
+    # -- Recent events -----------------------------------------------------
+    events = data.get("recent_events", [])
+    if events:
+        lines.append(f"## Recent Activity ({len(events)} most recent)")
+        for ev in events:
+            icon = "Slack" if ev["source_type"] == "slack" else "Jira"
+            title = f" — {ev['title']}" if ev.get("title") else ""
+            link = f" [link]({ev['permalink']})" if ev.get("permalink") else ""
+            lines.append(
+                f"- **[{icon}]** {ev['occurred_at']} | {ev['actor']} | "
+                f"{ev['event_kind']}{title}{link}"
+            )
+            lines.append(f"  {ev['text']}")
+        lines.append("")
+
+    # -- Stats -------------------------------------------------------------
+    stats = data.get("stats", {})
+    if stats:
+        lines.append(f"## Statistics")
+        lines.append(f"- Total events tracked: {stats.get('total_events', 0)}")
+        by_kind = stats.get("by_kind", {})
+        if by_kind:
+            parts = [f"{count} {kind}" for kind, count in by_kind.items()]
+            lines.append(f"- By type: {', '.join(parts)}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def run_mcp(transport: str = "sse", host: str = "127.0.0.1", port: int = 8000):
     mcp.run(transport=transport, host=host, port=port)
 
