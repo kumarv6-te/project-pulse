@@ -92,6 +92,9 @@ A `.cursor/mcp.json` is included. After running `python run.py`, reload Cursor (
 - *"What are the blockers on IncidentOps?"*
 - *"Is anything stuck or blocked?"*
 - *"Show me blockers and who owns them"*
+- *"What is the current status of the MVP?"*
+- *"Are we on track for launch?"*
+- *"Summarise IncidentOps for the leadership meeting"*
 
 ### Claude Desktop
 
@@ -127,6 +130,7 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://127.0.0
 
 | GET | `/api/changes?project_id=...&since=...` | Delta changelog — newly completed, new blockers, new decisions, activity summary |
 | GET | `/api/blockers?project_id=...` | Active blockers with ownership, last activity, and source evidence |
+| GET | `/api/ask?project_id=...&question=...` | Full project context bundle for interactive Q&A (pulse, blockers, events, stats) |
 | GET | `/api/health` | Health check |
 
 ---
@@ -140,6 +144,7 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://127.0.0
 | `get_project_events` | `project_id`, `source_type?`, `limit?` | Raw event feed from Slack and Jira |
 | `get_project_changes` | `project_id`, `since` | Delta changelog — what changed since a given date |
 | `get_project_blockers` | `project_id` | Active blockers with ownership, last activity, and evidence links |
+| `ask_project` | `project_id`, `question` | Interactive Q&A — answers any question grounded in real project data with citations |
 
 ---
 

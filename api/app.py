@@ -443,6 +443,172 @@ def project_blockers():
     })
 
 
+# ---------- GET /api/ask?project_id=...&question=... ----------
+
+_RECENT_EVENTS_LIMIT = 30
+
+
+@app.route("/api/ask", methods=["GET"])
+def ask_project():
+    """Return a comprehensive project context bundle so an LLM can answer
+    any free-form question grounded in real data with citations."""
+
+    db = get_db()
+    project_id = request.args.get("project_id")
+    question = request.args.get("question", "")
+
+    if not project_id:
+        return jsonify({"error": "Missing required query parameter: project_id"}), 400
+
+    project = db.execute(
+        "SELECT project_id, name, description FROM projects WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()
+
+    if project is None:
+        return jsonify({"error": "Project not found", "project_id": project_id}), 404
+
+    # --- Snapshot pulse ---------------------------------------------------
+    snapshot = db.execute(
+        "SELECT * FROM v_project_latest_snapshot WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()
+
+    pulse = None
+    if snapshot:
+        status = json.loads(snapshot["status_json"])
+        evidence_rows = db.execute(
+            """SELECT se.section, se.event_id,
+                      e.source_type, e.actor_display, e.occurred_at,
+                      e.permalink, e.text
+               FROM snapshot_evidence se
+               JOIN events e ON e.event_id = se.event_id
+               WHERE se.snapshot_id = ?""",
+            (snapshot["snapshot_id"],),
+        ).fetchall()
+
+        evidence_by_id = {}
+        for er in evidence_rows:
+            evidence_by_id[er["event_id"]] = {
+                "event_id": er["event_id"],
+                "source_type": er["source_type"],
+                "actor": er["actor_display"],
+                "occurred_at": er["occurred_at"],
+                "permalink": er["permalink"],
+                "snippet": er["text"],
+            }
+
+        def _resolve(items):
+            resolved = []
+            for item in items:
+                entry = {"text": item["text"]}
+                if "owner" in item:
+                    entry["owner"] = item["owner"]
+                entry["evidence"] = [
+                    evidence_by_id[eid]
+                    for eid in item.get("event_ids", [])
+                    if eid in evidence_by_id
+                ]
+                resolved.append(entry)
+            return resolved
+
+        sections = {}
+        for key in ("progress", "blockers", "decisions", "next_steps", "risks"):
+            if key in status and status[key]:
+                sections[key] = _resolve(status[key])
+
+        pulse = {
+            "snapshot_at": snapshot["snapshot_at"],
+            "window": {
+                "start": snapshot["window_start"],
+                "end": snapshot["window_end"],
+            },
+            "headline": status.get("headline"),
+            "sections": sections,
+        }
+
+    # --- Active blockers --------------------------------------------------
+    blocker_items = []
+    if snapshot:
+        snap_status = json.loads(snapshot["status_json"])
+        for item in snap_status.get("blockers", []):
+            ev_list = []
+            for eid in item.get("event_ids", []):
+                ev = db.execute(
+                    """SELECT event_id, source_type, occurred_at, actor_display,
+                              text, permalink FROM events WHERE event_id = ?""",
+                    (eid,),
+                ).fetchone()
+                if ev:
+                    ev_list.append({
+                        "event_id": ev["event_id"],
+                        "source_type": ev["source_type"],
+                        "occurred_at": ev["occurred_at"],
+                        "actor": ev["actor_display"],
+                        "text": ev["text"],
+                        "permalink": ev["permalink"],
+                    })
+            blocker_items.append({
+                "summary": item["text"],
+                "owner": item.get("owner"),
+                "evidence": ev_list,
+            })
+
+    # --- Recent events ----------------------------------------------------
+    event_rows = db.execute(
+        """SELECT event_id, source_type, occurred_at, container_name,
+                  actor_display, event_kind, title, text, permalink
+           FROM v_project_events
+           WHERE project_id = ?
+           ORDER BY occurred_at DESC
+           LIMIT ?""",
+        (project_id, _RECENT_EVENTS_LIMIT),
+    ).fetchall()
+
+    recent_events = [
+        {
+            "event_id": r["event_id"],
+            "source_type": r["source_type"],
+            "occurred_at": r["occurred_at"],
+            "container_name": r["container_name"],
+            "actor": r["actor_display"],
+            "event_kind": r["event_kind"],
+            "title": r["title"],
+            "text": r["text"],
+            "permalink": r["permalink"],
+        }
+        for r in event_rows
+    ]
+
+    # --- Statistics --------------------------------------------------------
+    stats_rows = db.execute(
+        """SELECT event_kind, COUNT(*) AS cnt
+           FROM v_project_events WHERE project_id = ?
+           GROUP BY event_kind""",
+        (project_id,),
+    ).fetchall()
+    event_stats = {r["event_kind"]: r["cnt"] for r in stats_rows}
+
+    total_events = db.execute(
+        "SELECT COUNT(*) AS cnt FROM v_project_events WHERE project_id = ?",
+        (project_id,),
+    ).fetchone()["cnt"]
+
+    return jsonify({
+        "project_id": project_id,
+        "project_name": project["name"],
+        "project_description": project["description"],
+        "question": question,
+        "pulse": pulse,
+        "blockers": blocker_items,
+        "recent_events": recent_events,
+        "stats": {
+            "total_events": total_events,
+            "by_kind": event_stats,
+        },
+    })
+
+
 # ---------- Health ----------
 
 @app.route("/api/health", methods=["GET"])
