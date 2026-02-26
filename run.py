@@ -76,7 +76,7 @@ def main():
     flask_env = os.environ.copy()
     flask_env["FLASK_RUN_PORT"] = str(flask_port)
     flask_proc = subprocess.Popen(
-        [FLASK_VENV_PYTHON, FLASK_APP, "--port", str(flask_port)],
+        [FLASK_VENV_PYTHON, FLASK_APP, "--host", "0.0.0.0", "--port", str(flask_port)],
         env=flask_env,
         cwd=ROOT,
     )
@@ -97,7 +97,7 @@ def main():
         [
             MCP_VENV_PYTHON, MCP_SERVER,
             "--transport", "sse",
-            "--host", "127.0.0.1",
+            "--host", "0.0.0.0",
             "--port", str(mcp_port),
         ],
         env=mcp_env,
@@ -119,8 +119,8 @@ def main():
     print()
     print("=" * 60)
     print("  ProjectPulse is running!")
-    print(f"  Flask API : http://127.0.0.1:{flask_port}")
-    print(f"  MCP Server: http://127.0.0.1:{mcp_port}/sse")
+    print(f"  Flask API : http://0.0.0.0:{flask_port}")
+    print(f"  MCP Server: http://0.0.0.0:{mcp_port}/sse")
     print("=" * 60)
     print("  Press Ctrl+C to stop both services.")
     print()

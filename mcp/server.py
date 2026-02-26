@@ -18,7 +18,7 @@ from typing import Optional
 import requests
 from fastmcp import FastMCP
 
-API_BASE = os.environ.get("PROJECTPULSE_API_URL", "http://127.0.0.1:5050")
+API_BASE = os.environ.get("PROJECTPULSE_API_URL", "http://0.0.0.0:5050")
 
 mcp = FastMCP(
     name="ProjectPulse",
@@ -430,7 +430,7 @@ def ask_project(project_id: str, question: str) -> str:
     return "\n".join(lines)
 
 
-def run_mcp(transport: str = "sse", host: str = "127.0.0.1", port: int = 8000):
+def run_mcp(transport: str = "sse", host: str = "0.0.0.0", port: int = 8000):
     mcp.run(transport=transport, host=host, port=port)
 
 
@@ -439,7 +439,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="ProjectPulse MCP Server")
     parser.add_argument("--transport", default="sse", choices=["sse", "stdio"])
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
     run_mcp(transport=args.transport, host=args.host, port=args.port)
