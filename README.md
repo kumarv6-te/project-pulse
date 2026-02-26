@@ -69,6 +69,14 @@ python slack_ingest_from_db.py
 
 Use `INCREMENTAL=1` to fetch only messages after the last run, or `FULL_REFRESH=1` to fetch all messages.
 
+**AI-powered project attribution and status extraction** (optional):
+```bash
+export OPENAI_API_KEY=sk-...
+export AI_ENABLED=1
+python slack_ingest_from_db.py      # AI classifies messages to projects when rule-based match fails
+python generate_status_snapshots.py # AI extracts trimmed progress/blockers/decisions from Slack standups
+```
+
 Generate status snapshots from ingested events:
 ```bash
 python generate_status_snapshots.py
@@ -234,12 +242,21 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://0.0.0.0
 
 ---
 
+## Slack ingest options (AI)
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `AI_ENABLED` | `0` | If `1`, use OpenAI to classify messages to projects when rule-based match fails |
+| `OPENAI_API_KEY` | — | Required for AI. Model: `OPENAI_MODEL` (default `gpt-4o-mini`) |
+
 ## Snapshot generator options
 
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `DB_PATH` | `./projectpulse_demo.db` | Database path |
 | `WINDOW_DAYS` | `7` | Days of events to include in snapshot (use `14` for 2 weeks) |
+| `AI_ENABLED` | `0` | If `1`, use OpenAI to extract trimmed progress/blockers/decisions from Slack standups |
+| `OPENAI_API_KEY` | — | Required for AI extraction |
 
 ---
 

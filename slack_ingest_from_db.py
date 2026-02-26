@@ -31,6 +31,8 @@ Optional:
   DEBUG=1           Print channel fetches and message counts.
   SCOPE_RULE=1      If set, fall back to scope_rule: link ALL messages to all projects
                     with channel in scope (legacy behavior). Default: use matching only.
+  AI_ENABLED=1      If set, use OpenAI to classify messages to projects and format text for status display.
+  OPENAI_API_KEY    Required for AI classification. OPENAI_MODEL defaults to gpt-4o-mini.
 
 Future ML classification options:
   - Embedding similarity: project descriptions + message text -> cosine similarity threshold
@@ -51,6 +53,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+try:
+    from ai_utils import ai_classify_message_to_projects, ai_format_message_for_status
+    _AI_AVAILABLE = True
+except ImportError:
+    ai_classify_message_to_projects = None
+    ai_format_message_for_status = None
+    _AI_AVAILABLE = False
+
 
 DB_PATH = os.environ.get("DB_PATH", "./projectpulse_demo.db")
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN") or os.environ.get("SLACK_API_TOKEN")
@@ -58,6 +68,7 @@ INCREMENTAL = os.environ.get("INCREMENTAL", "0") == "1"
 FULL_REFRESH = os.environ.get("FULL_REFRESH", "0") == "1"
 DEBUG = os.environ.get("DEBUG", "0") == "1"
 SCOPE_RULE = os.environ.get("SCOPE_RULE", "0") == "1"  # Legacy: link all messages to all projects in scope
+AI_ENABLED = os.environ.get("AI_ENABLED", "0") == "1"
 
 # Jira issue key pattern: PROJECT-123
 JIRA_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
@@ -122,6 +133,14 @@ def group_scopes_by_channel(
     for project_id, channel_id in scopes:
         by_channel.setdefault(channel_id, []).append(project_id)
     return by_channel
+
+
+def load_projects_for_ai(conn: sqlite3.Connection) -> List[Dict[str, str]]:
+    """Load project id, name, description for AI classification."""
+    return [
+        {"project_id": r["project_id"], "name": r["name"], "description": r["description"] or ""}
+        for r in conn.execute("SELECT project_id, name, description FROM projects WHERE is_active = 1").fetchall()
+    ]
 
 
 def load_project_matching_metadata(conn: sqlite3.Connection) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
@@ -421,6 +440,7 @@ def ingest_channel(
     user_cache: Dict[str, str],
     jira_key_to_projects: Dict[str, List[str]],
     project_keywords: Dict[str, List[str]],
+    projects_for_ai: List[Dict[str, str]],
 ) -> Dict[str, int]:
     """Ingest messages from a Slack channel into events and event_project_links.
     Links each message only to projects that match (Jira key or keyword).
@@ -472,7 +492,13 @@ def ingest_channel(
             actor_display = msg.get("username") or actor_id
 
         occurred_at = slack_ts_to_iso(ts)
-        text = message_to_text(msg)
+        raw_text = message_to_text(msg)
+        # Optionally format text for clean display in status views (AI_ENABLED)
+        if AI_ENABLED and _AI_AVAILABLE and ai_format_message_for_status:
+            formatted = ai_format_message_for_status(raw_text)
+            text = formatted if formatted else raw_text
+        else:
+            text = raw_text
         permalink = make_permalink(channel_id, ts)
         event_id = make_event_id("slack", source_ref)
 
@@ -499,6 +525,12 @@ def ingest_channel(
             links = [(pid, "scope_rule", 1.0, f"Message in channel {channel_name} (slack_channel scope)") for pid in project_ids]
         else:
             links = match_message_to_projects(text, project_ids, jira_key_to_projects, project_keywords)
+            # AI fallback: when no rule-based match, use LLM to classify (if enabled)
+            if not links and AI_ENABLED and _AI_AVAILABLE and ai_classify_message_to_projects:
+                ai_links = ai_classify_message_to_projects(text, projects_for_ai, project_ids)
+                for pid, att, conf, rat in ai_links:
+                    if conf >= 0.5:  # Only use AI matches above threshold
+                        links.append((pid, att, conf, rat))
 
         for project_id, attribution_type, confidence, rationale in links:
             link_event_to_project(
@@ -552,9 +584,12 @@ def main() -> None:
         return
 
     jira_key_to_projects, project_keywords = load_project_matching_metadata(conn)
+    projects_for_ai = load_projects_for_ai(conn)
     if DEBUG:
         print(f"  Jira keys: {dict(jira_key_to_projects)}")
         print(f"  Project keywords (sample): {list(project_keywords.items())[:3]}")
+    if AI_ENABLED:
+        print("  AI classification: enabled (OPENAI_API_KEY)")
 
     print(f"DB: {DB_PATH}")
     print(f"Found {len(scopes)} slack_channel scopes -> {len(resolved_scopes)} resolved.")
@@ -582,6 +617,7 @@ def main() -> None:
                 user_cache=user_cache,
                 jira_key_to_projects=jira_key_to_projects,
                 project_keywords=project_keywords,
+                projects_for_ai=projects_for_ai,
             )
             conn.commit()
             for project_id in project_ids:
