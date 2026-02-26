@@ -49,6 +49,65 @@ def now_iso() -> str:
     return datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 
+def adf_to_plain_text(adf: Any, max_len: int = 2000) -> str:
+    """
+    Extract plain text from Atlassian Document Format (ADF) JSON.
+    Recursively traverses doc/paragraph/text nodes. Returns empty string if invalid.
+    """
+    if not adf or not isinstance(adf, dict):
+        return ""
+
+    parts: List[str] = []
+
+    def _walk(node: Any, in_block: bool = False) -> None:
+        if not isinstance(node, dict):
+            return
+        node_type = node.get("type") or ""
+        content = node.get("content") or []
+
+        if node_type == "text":
+            parts.append(node.get("text") or "")
+        elif node_type == "hardBreak":
+            parts.append("\n")
+        elif node_type == "mention":
+            attrs = node.get("attrs") or {}
+            parts.append(attrs.get("text") or attrs.get("id") or "")
+        elif node_type == "emoji":
+            attrs = node.get("attrs") or {}
+            parts.append(attrs.get("shortName") or "")
+        elif node_type in ("paragraph", "heading", "listItem", "tableCell", "tableHeader"):
+            for child in content:
+                _walk(child, in_block=True)
+            if content:
+                parts.append("\n")
+        elif node_type in ("bulletList", "orderedList"):
+            for child in content:
+                _walk(child, in_block=True)
+        elif node_type in ("doc", "blockquote", "panel", "expand", "nestedExpand"):
+            for child in content:
+                _walk(child, in_block=in_block)
+        elif node_type == "table":
+            for row in content:
+                for cell in (row.get("content") or []):
+                    _walk(cell, in_block=True)
+        elif node_type == "tableRow":
+            for child in content:
+                _walk(child, in_block=True)
+        elif node_type == "codeBlock":
+            for child in content:
+                if isinstance(child, dict) and child.get("type") == "text":
+                    parts.append(child.get("text") or "")
+            parts.append("\n")
+        else:
+            for child in content:
+                _walk(child, in_block=in_block)
+
+    _walk(adf)
+    result = "".join(parts).strip()
+    result = " ".join(result.split())  # normalize whitespace
+    return result[:max_len] if result else ""
+
+
 def jira_headers() -> Dict[str, str]:
     token = base64.b64encode(f"{JIRA_EMAIL}:{JIRA_API_TOKEN}".encode()).decode()
     return {
@@ -306,9 +365,14 @@ def ingest_epic(conn: sqlite3.Connection, project_id: str, epic_key: str) -> Dic
             author_id = author.get("accountId")
             author_name = author.get("displayName")
 
-            # Jira Cloud v3 comment body is ADF JSON. Keep raw; store a small readable text.
+            # Jira Cloud v3 comment body is ADF JSON. Extract plain text for events.text.
             body = c.get("body")
-            text = f"{issue_key} comment by {author_name}: (ADF body stored in raw_json)"
+            plain = adf_to_plain_text(body) if body else ""
+            text = (
+                f"{issue_key} comment by {author_name}: {plain}"
+                if plain
+                else f"{issue_key} comment by {author_name}: (no text)"
+            )
 
             event_id = make_event_id("jira", source_ref)
             insert_event(
