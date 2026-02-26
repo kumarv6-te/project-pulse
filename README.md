@@ -39,8 +39,21 @@ pip install -r requirements.txt
 
 ### 3. Create database and sample data
 
+**Option A – Full demo (Slack + Jira sample data):**
 ```bash
 python createdb-insert-sample-data.py
+```
+
+**Option B – Jira bootstrap + live ingest:**
+```bash
+python createdb-jira-bootstrap.py
+# Set JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, then:
+python jira_ingest_from_db.py
+```
+
+For a full refresh including all child issues (e.g. CLOPS-1570, CLOPS-1571, CLOPS-1572), set `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` first:
+```bash
+python createdb-jira-bootstrap.py && FULL_REFRESH=1 DEBUG=1 python jira_ingest_from_db.py
 ```
 
 This creates `projectpulse_demo.db` (SQLite) and `projectpulse_schema.sql` in the project root with the full schema and sample data: projects (IncidentOps, CostOptimizer), events, attribution links, status snapshots, and convenience views.
@@ -52,6 +65,22 @@ This creates `projectpulse_demo.db` (SQLite) and `projectpulse_schema.sql` in th
 | Script | Description |
 |--------|--------------|
 | `createdb-insert-sample-data.py` | Creates the SQLite database, schema, and sample data |
+| `createdb-jira-bootstrap.py` | Creates minimal DB with projects + jira_epic scopes for Jira ingestion |
+| `jira_ingest_from_db.py` | Fetches Jira issues, comments, status changes into events (read-only) |
+
+---
+
+## Jira ingest options
+
+| Env var | Required | Default | Description |
+|---------|----------|---------|-------------|
+| `JIRA_BASE_URL` | Yes | — | e.g. `https://yourcompany.atlassian.net` |
+| `JIRA_EMAIL` | Yes | — | Atlassian login email |
+| `JIRA_API_TOKEN` | Yes | — | API token |
+| `DB_PATH` | No | `./projectpulse_demo.db` | Source database path |
+| `INCREMENTAL` | No | `0` | If `1`, limits JQL to issues updated since `last_ingested_at` |
+| `FULL_REFRESH` | No | `0` | If `1`, ignores `last_ingested_at` and fetches all issues in the epic |
+| `DEBUG` | No | `0` | If `1`, prints JQL queries and hit counts for troubleshooting |
 
 
 
