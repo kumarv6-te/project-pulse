@@ -87,6 +87,8 @@ A `.cursor/mcp.json` is included. After running `python run.py`, reload Cursor (
 - *"What's the status of IncidentOps?"*
 - *"Show me the blockers"*
 - *"What Jira updates happened recently?"*
+- *"What changed on IncidentOps since Monday?"*
+- *"Catch me up on what I missed this week"*
 
 ### Claude Desktop
 
@@ -119,6 +121,7 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://127.0.0
 | GET | `/api/projects` | List all active projects |
 | GET | `/api/pulse?project_id=...` | Structured status pulse with evidence links |
 | GET | `/api/events?project_id=...` | Event feed (optional: `source_type`, `limit`, `offset`) |
+| GET | `/api/changes?project_id=...&since=...` | Delta changelog — newly completed, new blockers, new decisions, activity summary |
 | GET | `/api/health` | Health check |
 
 ---
@@ -130,6 +133,7 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://127.0.0
 | `list_projects` | *(none)* | List all active projects |
 | `get_project_pulse` | `project_id` | Status summary with progress, blockers, decisions, risks |
 | `get_project_events` | `project_id`, `source_type?`, `limit?` | Raw event feed from Slack and Jira |
+| `get_project_changes` | `project_id`, `since` | Delta changelog — what changed since a given date |
 
 ---
 

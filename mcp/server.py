@@ -178,6 +178,87 @@ def get_project_events(
     return "\n".join(lines)
 
 
+@mcp.tool()
+def get_project_changes(
+    project_id: str,
+    since: str,
+) -> str:
+    """Get a "what changed" changelog for a project since a given date.
+    Returns newly completed items, new blockers, new decisions, and an
+    activity summary — like a project changelog.
+
+    Use this tool when the user asks:
+    - "What changed since Monday?"
+    - "What happened this week on <project>?"
+    - "Give me a delta / changelog for <project>"
+    - "What's new since <date>?"
+    - "Catch me up on what I missed"
+
+    Each item includes evidence links (Slack permalinks or Jira URLs).
+
+    Args:
+        project_id: The project identifier (e.g. "proj_incidentops").
+                    Use list_projects first if you don't know the ID.
+        since: ISO-8601 date or datetime to look back from
+               (e.g. "2026-02-23" or "2026-02-23T00:00:00Z").
+    """
+    try:
+        data = _api_get("/api/changes", params={
+            "project_id": project_id,
+            "since": since,
+        })
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            return f"Project `{project_id}` not found. Use list_projects to see available projects."
+        if exc.response is not None and exc.response.status_code == 400:
+            return "Missing parameters. Provide both project_id and since (ISO-8601 date)."
+        raise
+
+    total = data.get("total_events", 0)
+    if total == 0:
+        return f"No changes found for **{data.get('project_name', project_id)}** since {since}."
+
+    lines = [
+        f"# {data['project_name']} — Changes Since {data['since']}",
+        f"*{total} events detected*\n",
+    ]
+
+    section_labels = {
+        "newly_completed": "Newly Completed",
+        "new_blockers": "New Blockers",
+        "new_decisions": "New Decisions",
+        "other_activity": "Other Activity",
+    }
+
+    sections = data.get("sections", {})
+    for key, label in section_labels.items():
+        items = sections.get(key, [])
+        if not items:
+            continue
+        lines.append(f"## {label}")
+        for ev in items:
+            icon = "Slack" if ev["source_type"] == "slack" else "Jira"
+            lines.append(f"- {ev['text']} ({ev['actor']})")
+            if ev.get("permalink"):
+                lines.append(f"  → [{icon}]({ev['permalink']})")
+        lines.append("")
+
+    summary = data.get("activity_summary", {})
+    by_source = summary.get("by_source", {})
+    by_kind = summary.get("by_kind", {})
+
+    lines.append("## Activity Summary")
+    if by_source:
+        parts = [f"{count} {src}" for src, count in by_source.items()]
+        lines.append(f"- By source: {', '.join(parts)}")
+    if by_kind:
+        parts = [f"{count} {kind}" for kind, count in by_kind.items()]
+        lines.append(f"- By type: {', '.join(parts)}")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
 def run_mcp(transport: str = "sse", host: str = "127.0.0.1", port: int = 8000):
     mcp.run(transport=transport, host=host, port=port)
 
