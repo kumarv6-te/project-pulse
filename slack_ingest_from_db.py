@@ -25,7 +25,7 @@ Env vars:
   DB_PATH           default ./projectpulse_demo.db
 
 Optional:
-  INCREMENTAL=1     If set, uses project_checkpoints.last_ingested_at to fetch only
+  INCREMENTAL=1     If set, uses slack_ingest_checkpoint.json (file) to fetch only
                     messages after that time (reduces API calls).
   FULL_REFRESH=1    If set, ignores last_ingested_at and fetches all messages.
   DEBUG=1           Print channel fetches and message counts.
@@ -220,23 +220,42 @@ def match_message_to_projects(
     return [(pid, att, conf, rat) for pid, (att, conf, rat) in matches.items()]
 
 
-def get_last_ingested_at(conn: sqlite3.Connection, project_id: str) -> Optional[str]:
-    r = conn.execute(
-        "SELECT last_ingested_at FROM project_checkpoints WHERE project_id=?",
-        (project_id,),
-    ).fetchone()
-    return r["last_ingested_at"] if r else None
+# TODO: Replace file-based checkpoint with a DB table (e.g. source_ingest_checkpoints)
+# to avoid Jira/Slack overwriting each other's last_ingested_at.
+def _get_slack_checkpoint_path() -> str:
+    """Path to file storing Slack-specific last_ingested_at (avoids Jira overwrite)."""
+    db_dir = os.path.dirname(os.path.abspath(DB_PATH))
+    return os.path.join(db_dir, "slack_ingest_checkpoint.json")
 
 
-def set_last_ingested_at(conn: sqlite3.Connection, project_id: str, ts: str) -> None:
-    conn.execute(
-        """
-        INSERT INTO project_checkpoints(project_id, last_ingested_at)
-        VALUES (?, ?)
-        ON CONFLICT(project_id) DO UPDATE SET last_ingested_at=excluded.last_ingested_at
-        """,
-        (project_id, ts),
-    )
+def _load_slack_checkpoints() -> Dict[str, str]:
+    path = _get_slack_checkpoint_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_slack_checkpoints(data: Dict[str, str]) -> None:
+    path = _get_slack_checkpoint_path()
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def get_slack_last_ingested_at(project_id: str) -> Optional[str]:
+    """Slack-specific checkpoint from file (not DB)."""
+    return _load_slack_checkpoints().get(project_id)
+
+
+def set_slack_last_ingested_at(project_id: str, ts: str) -> None:
+    """Update Slack checkpoint in file (does not touch project_checkpoints)."""
+    data = _load_slack_checkpoints()
+    data[project_id] = ts
+    _save_slack_checkpoints(data)
 
 
 def event_exists(conn: sqlite3.Connection, source_type: str, source_ref: str) -> bool:
@@ -449,11 +468,11 @@ def ingest_channel(
     Use SCOPE_RULE=1 for legacy behavior (link all to all)."""
     counters = {"messages": 0, "skipped_existing": 0, "skipped_filter": 0, "no_match": 0}
 
-    # oldest_ts = max of last_ingested_at across all projects for this channel
+    # oldest_ts = max of Slack checkpoint across all projects for this channel (file-based)
     oldest_ts: Optional[str] = None
     if INCREMENTAL and not FULL_REFRESH:
         for project_id in project_ids:
-            last = get_last_ingested_at(conn, project_id)
+            last = get_slack_last_ingested_at(project_id)
             if last:
                 try:
                     dt = datetime.datetime.fromisoformat(last.replace("Z", "+00:00"))
@@ -599,9 +618,9 @@ def main() -> None:
     print(f"Found {len(scopes)} slack_channel scopes -> {len(resolved_scopes)} resolved.")
     print("Attribution: entity_match (Jira keys) + keyword_match (project name). Use SCOPE_RULE=1 for legacy.")
     if INCREMENTAL:
-        print("INCREMENTAL=1 -> limiting fetch by project_checkpoints.last_ingested_at")
+        print("INCREMENTAL=1 -> limiting fetch by slack_ingest_checkpoint.json")
     if FULL_REFRESH:
-        print("FULL_REFRESH=1 -> fetching all messages (ignoring last_ingested_at)")
+        print("FULL_REFRESH=1 -> fetching all messages (ignoring slack checkpoint)")
     if DEBUG:
         print("DEBUG=1 -> printing channel fetches")
     print()
@@ -625,7 +644,7 @@ def main() -> None:
             )
             conn.commit()
             for project_id in project_ids:
-                set_last_ingested_at(conn, project_id, ingested_at)
+                set_slack_last_ingested_at(project_id, ingested_at)
             conn.commit()
 
             print(
