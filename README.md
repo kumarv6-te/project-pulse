@@ -76,37 +76,33 @@ deactivate
 ### 5. Run ProjectPulse
 
 ```bash
-python run.py
+python3 run.py
 ```
 
-This starts both services:
+This starts all 4 services with a single command:
 
-| Service | URL | Description |
-|---------|-----|-------------|
-| Flask API | http://0.0.0.0:5050 | REST API serving project data from SQLite |
-| MCP Server | http://0.0.0.0:8000/sse | LLM-facing tools over SSE, calls the Flask API |
+| # | Service | URL | Description |
+|---|---------|-----|-------------|
+| 1 | Flask API | http://0.0.0.0:5050 | REST API serving project data from SQLite |
+| 2 | MCP Server | http://0.0.0.0:8000/sse | LLM-facing tools over SSE, calls the Flask API |
+| 3 | Streamlit UI | http://0.0.0.0:8501 | Interactive dashboard, calls the Flask API |
+| 4 | MCP Inspector | http://0.0.0.0:6274 | Dev tool to test MCP tools (requires Node.js) |
 
 Custom ports:
 
 ```bash
-python run.py --flask-port 6000 --mcp-port 9000
+python3 run.py --flask-port 6000 --mcp-port 9000 --ui-port 8502
 ```
 
-Press `Ctrl+C` to stop both services.
-
-### 6. Run the Streamlit Dashboard
-
-In a separate terminal (with the Flask API already running):
+Skip optional services:
 
 ```bash
-streamlit run app.py
+python3 run.py --no-ui              # skip Streamlit UI
+python3 run.py --no-inspector       # skip MCP Inspector
+python3 run.py --no-ui --no-inspector  # only Flask API + MCP Server
 ```
 
-Opens at http://localhost:8501. The dashboard calls the Flask API at `http://127.0.0.1:5050` by default. Override with:
-
-```bash
-PROJECTPULSE_API_URL=http://127.0.0.1:6000 streamlit run app.py
-```
+Press `Ctrl+C` to stop all services.
 
 ### Streamlit Dashboard Pages
 
@@ -196,7 +192,7 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://0.0.0.0
 
 | Script | Description |
 |--------|-------------|
-| `run.py` | Master launcher — starts Flask API and MCP Server |
+| `run.py` | Master launcher — starts Flask API, MCP Server, Streamlit UI, and MCP Inspector |
 | `createdb-insert-sample-data.py` | Creates the SQLite database, schema, and sample data |
 | `createdb-jira-bootstrap.py` | Creates minimal DB with projects + jira_epic scopes for Jira ingestion |
 | `jira_ingest_from_db.py` | Fetches Jira issues, comments, status changes into events (read-only) |

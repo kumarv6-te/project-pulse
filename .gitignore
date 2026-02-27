@@ -2,3 +2,4 @@
 *.sql
 venv/
 mcp/venv/
+__pycache__/
