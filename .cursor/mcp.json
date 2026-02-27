@@ -1,7 +1,15 @@
 {
   "mcpServers": {
     "projectpulse": {
-      "url": "http://0.0.0.0:8000/sse"
+      "url": "http://0.0.0.0:8000/sse",
+      "autoApprove": [
+        "list_projects",
+        "get_project_blockers",
+        "get_project_changes",
+        "get_project_events",
+        "get_project_pulse",
+        "ask_project"
+      ]
     }
   }
 }
