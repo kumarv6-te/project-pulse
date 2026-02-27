@@ -27,8 +27,20 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-FLASK_VENV_PYTHON = os.path.join(ROOT, "venv", "bin", "python")
-MCP_VENV_PYTHON = os.path.join(ROOT, "mcp", "venv", "bin", "python")
+def _venv_python() -> str:
+    for name in (".venv", "venv"):
+        p = os.path.join(ROOT, name, "bin", "python")
+        if os.path.isfile(p) or (os.path.islink(p) and os.path.exists(p)):
+            return p
+    return sys.executable
+
+
+FLASK_VENV_PYTHON = _venv_python()
+MCP_VENV_PYTHON = (
+    os.path.join(ROOT, "mcp", "venv", "bin", "python")
+    if os.path.isfile(os.path.join(ROOT, "mcp", "venv", "bin", "python"))
+    else _venv_python()
+)
 
 FLASK_APP = os.path.join(ROOT, "API", "app.py")
 MCP_SERVER = os.path.join(ROOT, "mcp", "server.py")
@@ -58,6 +70,7 @@ def main():
     parser.add_argument("--ui-port", type=int, default=8501)
     parser.add_argument("--inspector-port", type=int, default=6274)
     parser.add_argument("--no-ui", action="store_true", help="Skip launching the Streamlit UI")
+    parser.add_argument("--no-mcp", action="store_true", help="Skip launching the MCP Server")
     parser.add_argument("--no-inspector", action="store_true", help="Skip launching MCP Inspector")
     args = parser.parse_args()
 
@@ -66,6 +79,7 @@ def main():
     ui_port = args.ui_port
     inspector_port = args.inspector_port
     launch_ui = not args.no_ui
+    launch_mcp = not args.no_mcp
     launch_inspector = not args.no_inspector
 
     procs: list[subprocess.Popen] = []
@@ -106,29 +120,30 @@ def main():
 
     print(f"[run.py] Flask API ready at http://0.0.0.0:{flask_port}")
 
-    # ── 2. MCP Server ───────────────────────────────────────────────
-    print(f"[run.py] Starting MCP Server (SSE) on port {mcp_port}...")
-    mcp_env = os.environ.copy()
-    mcp_env["PROJECTPULSE_API_URL"] = f"http://127.0.0.1:{flask_port}"
-    mcp_proc = subprocess.Popen(
-        [
-            MCP_VENV_PYTHON, MCP_SERVER,
-            "--transport", "sse",
-            "--host", "0.0.0.0",
-            "--port", str(mcp_port),
-        ],
-        env=mcp_env,
-        cwd=ROOT,
-    )
-    procs.append(mcp_proc)
-
-    time.sleep(2)
+    # ── 2. MCP Server (optional) ─────────────────────────────────────
+    mcp_proc = None
+    if launch_mcp:
+        print(f"[run.py] Starting MCP Server (SSE) on port {mcp_port}...")
+        mcp_env = os.environ.copy()
+        mcp_env["PROJECTPULSE_API_URL"] = f"http://127.0.0.1:{flask_port}"
+        mcp_proc = subprocess.Popen(
+            [
+                MCP_VENV_PYTHON, MCP_SERVER,
+                "--transport", "sse",
+                "--host", "0.0.0.0",
+                "--port", str(mcp_port),
+            ],
+            env=mcp_env,
+            cwd=ROOT,
+        )
+        procs.append(mcp_proc)
+        time.sleep(2)
 
     if flask_proc.poll() is not None:
         print("[run.py] ERROR: Flask API exited unexpectedly.")
         cleanup()
         return
-    if mcp_proc.poll() is not None:
+    if mcp_proc is not None and mcp_proc.poll() is not None:
         print("[run.py] ERROR: MCP Server exited unexpectedly.")
         cleanup()
         return

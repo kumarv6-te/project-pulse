@@ -1,5 +1,8 @@
 *.db
 *.sql
+.env
+slack_ingest_checkpoint.json
+ingest.log
 venv/
 mcp/venv/
 __pycache__/
