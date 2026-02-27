@@ -3,7 +3,7 @@
 
 Uses OpenAI API (or compatible) for:
   - Project attribution: classify Slack messages to relevant projects
-  - Status extraction: extract trimmed progress/blockers/decisions from Slack messages
+  - Status extraction: extract trimmed progress/blockers/decisions from Slack and Jira messages
   - Message formatting: format raw Slack text for clean display in status views
 
 Env: OPENAI_API_KEY (required for AI features). Set AI_ENABLED=1 to use.
@@ -142,6 +142,67 @@ JSON only, no other text."""
         return results
     except Exception:
         return []
+
+
+def ai_extract_status_from_jira(
+    text: str,
+    event_kind: str,
+    actor_display: Optional[str] = None,
+    issue_key: Optional[str] = None,
+) -> Optional[Tuple[str, str]]:
+    """
+    Use LLM to classify a Jira comment or status change into a snapshot section.
+    Returns (section, summary_text) or None if unclassified.
+    section: progress | blockers | decisions | next_steps | risks
+    """
+    if not AI_ENABLED or not OPENAI_API_KEY or not (text or "").strip():
+        return None
+
+    client = _client()
+    if not client:
+        return None
+
+    actor = actor_display or "Unknown"
+    issue_ref = f" (issue: {issue_key})" if issue_key else ""
+
+    prompt = f"""Classify this Jira activity into exactly one status section.
+
+Sections:
+- progress: completed work, shipped items, delivered, closed, done
+- blockers: blocked, waiting, stuck, dependencies
+- decisions: decisions made, agreements, we will
+- next_steps: planned work, in progress, PRs, tickets to create
+- risks: risks, delays, dependencies, may delay
+
+Jira {event_kind}{issue_ref} (by {actor}):
+---
+{(text or "")[:2000]}
+---
+
+Respond with JSON: {{"section": "progress|blockers|decisions|next_steps|risks", "summary": "1-2 sentence trimmed summary"}}
+If the content is not project-relevant status (e.g. trivial "LGTM"), return {{"section": null, "summary": null}}.
+JSON only."""
+
+    try:
+        resp = client.chat.completions.create(
+            model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        content = content.strip()
+        parsed = json.loads(content)
+        section = (parsed.get("section") or "").lower()
+        summary = (parsed.get("summary") or "").strip()
+        if section not in ("progress", "blockers", "decisions", "next_steps", "risks") or not summary:
+            return None
+        return (section, summary[:500])
+    except Exception:
+        return None
 
 
 def ai_extract_status_from_slack(

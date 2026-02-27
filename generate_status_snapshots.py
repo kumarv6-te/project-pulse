@@ -5,8 +5,8 @@ Reads events from the database and synthesizes them into structured
 project_status_snapshots (headline, progress, blockers, decisions, next_steps, risks).
 
 Classification:
-  - Jira: heuristic rules (status changes, keyword matching)
-  - Slack: AI extraction when AI_ENABLED=1 (OPENAI_API_KEY), else keyword heuristics
+  - Jira: AI extraction when AI_ENABLED=1, else heuristic rules
+  - Slack: AI extraction when AI_ENABLED=1, else keyword heuristics
 
 Usage:
   python generate_status_snapshots.py
@@ -14,7 +14,7 @@ Usage:
 Env vars:
   DB_PATH         default ./projectpulse_demo.db
   WINDOW_DAYS     default 7 (days of events to include in snapshot)
-  AI_ENABLED=1    Use OpenAI to extract trimmed status from Slack messages
+  AI_ENABLED=1    Use OpenAI to extract status from Slack and Jira events
   OPENAI_API_KEY  Required for AI. OPENAI_MODEL defaults to gpt-4o-mini.
 """
 
@@ -28,11 +28,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from ai_utils import ai_extract_status_from_slack
+    from ai_utils import ai_extract_status_from_slack, ai_extract_status_from_jira
     _AI_EXTRACT_AVAILABLE = True
+    _AI_JIRA_AVAILABLE = True
 except ImportError:
     ai_extract_status_from_slack = None
+    ai_extract_status_from_jira = None
     _AI_EXTRACT_AVAILABLE = False
+    _AI_JIRA_AVAILABLE = False
 
 DB_PATH = os.environ.get("DB_PATH", "./projectpulse_demo.db")
 AI_ENABLED = os.environ.get("AI_ENABLED", "0") == "1"
@@ -231,6 +234,30 @@ def build_snapshot_for_project(
                 continue  # AI handled this message
             # AI returned items but none for this project: fall through to heuristic
 
+        # Jira comments and status changes: use AI extraction when enabled (semantic classification)
+        if event_kind in ("comment", "status_change") and AI_ENABLED and _AI_JIRA_AVAILABLE and ai_extract_status_from_jira:
+            issue_key = extract_issue_key(text, event_id)
+            ai_result = ai_extract_status_from_jira(text, event_kind, actor, issue_key)
+            if ai_result:
+                section, summary = ai_result
+                key = (summary[:80], actor or "")
+                if section == "progress" and key not in seen_progress:
+                    seen_progress.add(key)
+                    progress.append({"text": summary[:500], "owner": actor, "event_ids": [event_id]})
+                elif section == "blockers" and key not in seen_blockers:
+                    seen_blockers.add(key)
+                    blockers.append({"text": summary[:500], "owner": actor, "event_ids": [event_id]})
+                elif section == "decisions" and key not in seen_decisions:
+                    seen_decisions.add(key)
+                    decisions.append({"text": summary[:500], "owner": actor, "event_ids": [event_id]})
+                elif section == "next_steps" and key not in seen_next_steps:
+                    seen_next_steps.add(key)
+                    next_steps.append({"text": summary[:500], "owner": actor, "event_ids": [event_id]})
+                elif section == "risks" and key not in seen_risks:
+                    seen_risks.add(key)
+                    risks.append({"text": summary[:500], "event_ids": [event_id]})
+                continue
+
         section, summary = classify_event(event_kind, text, raw_json, actor)
         if not section or not summary:
             continue
@@ -296,7 +323,7 @@ def main() -> None:
     ]
 
     if AI_ENABLED:
-        print("AI status extraction: enabled (Slack messages, per-project routing)")
+        print("AI status extraction: enabled (Slack + Jira)")
 
     created = 0
     for p in projects:

@@ -31,7 +31,7 @@ Optional:
   DEBUG=1           Print channel fetches and message counts.
   SCOPE_RULE=1      If set, fall back to scope_rule: link ALL messages to all projects
                     with channel in scope (legacy behavior). Default: use matching only.
-  AI_ENABLED=1      If set, use OpenAI to classify messages to projects and format text for status display.
+  AI_ENABLED=1      If set, use OpenAI to classify messages first; rules (Jira/keyword) used only when AI returns nothing.
   OPENAI_API_KEY    Required for AI classification. OPENAI_MODEL defaults to gpt-4o-mini.
 
 Future ML classification options:
@@ -524,13 +524,15 @@ def ingest_channel(
         if SCOPE_RULE:
             links = [(pid, "scope_rule", 1.0, f"Message in channel {channel_name} (slack_channel scope)") for pid in project_ids]
         else:
-            links = match_message_to_projects(text, project_ids, jira_key_to_projects, project_keywords)
-            # AI fallback: when no rule-based match, use LLM to classify (if enabled)
-            if not links and AI_ENABLED and _AI_AVAILABLE and ai_classify_message_to_projects:
+            # AI first: use LLM to classify when enabled; fall back to rules only when AI returns nothing
+            links: List[Tuple[str, str, float, str]] = []
+            if AI_ENABLED and _AI_AVAILABLE and ai_classify_message_to_projects:
                 ai_links = ai_classify_message_to_projects(text, projects_for_ai, project_ids)
                 for pid, att, conf, rat in ai_links:
                     if conf >= 0.5:  # Only use AI matches above threshold
                         links.append((pid, att, conf, rat))
+            if not links:
+                links = match_message_to_projects(text, project_ids, jira_key_to_projects, project_keywords)
 
         for project_id, attribution_type, confidence, rationale in links:
             link_event_to_project(
