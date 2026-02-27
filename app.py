@@ -9,6 +9,8 @@ five core views:
   5. Ask ProjectPulse  (keyword Q&A grounded in project data)
 """
 
+from __future__ import annotations
+
 import datetime
 import os
 
