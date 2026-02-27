@@ -44,16 +44,38 @@ pip install -r requirements.txt
 python createdb-insert-sample-data.py
 ```
 
-**Option B – Jira bootstrap + live ingest:**
+**Option B – Bootstrap + live ingest (Jira + Slack):**
 ```bash
-python createdb-jira-bootstrap.py
+python createdb-bootstrap.py
 # Set JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, then:
 python jira_ingest_from_db.py
+# Set SLACK_BOT_TOKEN, then:
+python slack_ingest_from_db.py
 ```
 
 For a full refresh including all child issues (e.g. CLOPS-1570, CLOPS-1571, CLOPS-1572), set `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` first:
 ```bash
-python createdb-jira-bootstrap.py && FULL_REFRESH=1 DEBUG=1 python jira_ingest_from_db.py
+python createdb-bootstrap.py && FULL_REFRESH=1 DEBUG=1 python jira_ingest_from_db.py
+```
+
+**Option C – Slack ingest (live messages from channels):**
+
+`createdb-bootstrap.py` already adds `slack_channel` scopes. Or use `createdb-insert-sample-data.py` for sample data. Then:
+```bash
+# Create a Slack app with scopes: channels:history, groups:history, channels:read, users:read
+export SLACK_BOT_TOKEN=xoxb-your-bot-token
+python slack_ingest_from_db.py
+```
+
+Use `INCREMENTAL=1` to fetch only messages after the last run, or `FULL_REFRESH=1` to fetch all messages.
+
+**AI-powered project attribution and status extraction** (optional, uses AWS Bedrock):
+```bash
+export AI_ENABLED=1
+export AWS_REGION=us-east-1
+export BEDROCK_MODEL_ID=anthropic.claude-3-haiku-20240307-v1:0
+python slack_ingest_from_db.py      # AI classifies messages to projects (Bedrock)
+python generate_status_snapshots.py # AI extracts trimmed progress/blockers/decisions from Slack standups
 ```
 
 Generate status snapshots from ingested events:
@@ -194,7 +216,7 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://0.0.0.0
 |--------|-------------|
 | `run.py` | Master launcher — starts Flask API, MCP Server, Streamlit UI, and MCP Inspector |
 | `createdb-insert-sample-data.py` | Creates the SQLite database, schema, and sample data |
-| `createdb-jira-bootstrap.py` | Creates minimal DB with projects + jira_epic scopes for Jira ingestion |
+| `createdb-bootstrap.py` | Creates minimal DB with projects + jira_epic + slack_channel scopes for Jira and Slack ingestion |
 | `jira_ingest_from_db.py` | Fetches Jira issues, comments, status changes into events (read-only) |
 | `generate_status_snapshots.py` | Synthesizes events into project_status_snapshots (progress, blockers, next_steps) |
 | `create-db.py` | Creates empty database with schema only |
@@ -217,12 +239,24 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://0.0.0.0
 
 ---
 
+## Slack ingest options (AI)
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `AI_ENABLED` | `0` | If `1`, use AWS Bedrock to classify messages to projects |
+| `AWS_REGION` | `us-east-1` | AWS region for Bedrock |
+| `BEDROCK_MODEL_ID` | `anthropic.claude-3-haiku-20240307-v1:0` | Bedrock model ID |
+| `AWS_PROFILE` | — | Optional; for local dev with SSO/profile |
+
 ## Snapshot generator options
 
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `DB_PATH` | `./projectpulse_demo.db` | Database path |
 | `WINDOW_DAYS` | `7` | Days of events to include in snapshot (use `14` for 2 weeks) |
+| `AI_ENABLED` | `0` | If `1`, use AWS Bedrock to extract status from Slack and Jira |
+| `AWS_REGION` | `us-east-1` | AWS region for Bedrock |
+| `BEDROCK_MODEL_ID` | `anthropic.claude-3-haiku-20240307-v1:0` | Bedrock model ID |
 
 ---
 
@@ -244,7 +278,7 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://0.0.0.0
 
 ## Accessing the database with SQLite3
 
-After creating the database (via `createdb-insert-sample-data.py` or `createdb-jira-bootstrap.py` + `jira_ingest_from_db.py`), you can inspect it from the command line:
+After creating the database (via `createdb-insert-sample-data.py` or `createdb-bootstrap.py` + ingest scripts), you can inspect it from the command line:
 
 ```bash
 # Open the database (from project root)

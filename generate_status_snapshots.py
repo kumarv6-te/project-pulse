@@ -4,12 +4,9 @@
 Reads events from the database and synthesizes them into structured
 project_status_snapshots (headline, progress, blockers, decisions, next_steps, risks).
 
-Uses heuristic rules to classify events:
-  - progress: status changes to Done/Closed/Resolved
-  - blockers: comments containing blocked, waiting, stuck
-  - decisions: comments containing decision, decided, agreed
-  - next_steps: status to In Progress/In Review, or PR-related comments
-  - risks: comments containing risk, delay, dependency
+Classification:
+  - Jira: AI extraction when AI_ENABLED=1, else heuristic rules
+  - Slack: AI extraction when AI_ENABLED=1, else keyword heuristics
 
 Usage:
   python generate_status_snapshots.py
@@ -17,6 +14,9 @@ Usage:
 Env vars:
   DB_PATH         default ./projectpulse_demo.db
   WINDOW_DAYS     default 7 (days of events to include in snapshot)
+  AI_ENABLED=1    Use AWS Bedrock to extract status from Slack and Jira events
+  AWS_REGION      AWS region for Bedrock (default us-east-1)
+  BEDROCK_MODEL_ID Bedrock model ID (default anthropic.claude-3-haiku-20240307-v1:0)
 """
 
 from __future__ import annotations
@@ -28,7 +28,18 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    from ai_utils import ai_extract_status_from_slack, ai_extract_status_from_jira
+    _AI_EXTRACT_AVAILABLE = True
+    _AI_JIRA_AVAILABLE = True
+except ImportError:
+    ai_extract_status_from_slack = None
+    ai_extract_status_from_jira = None
+    _AI_EXTRACT_AVAILABLE = False
+    _AI_JIRA_AVAILABLE = False
+
 DB_PATH = os.environ.get("DB_PATH", "./projectpulse_demo.db")
+AI_ENABLED = os.environ.get("AI_ENABLED", "0") == "1"
 WINDOW_DAYS = int(os.environ.get("WINDOW_DAYS", "7"))
 
 # Status values that indicate completion (progress)
@@ -42,6 +53,8 @@ BLOCKER_KEYWORDS = ["blocked", "waiting", "stuck", "blocker", "blocking"]
 DECISION_KEYWORDS = ["decision", "decided", "agreed", "we will", "we'll", "adopt"]
 RISK_KEYWORDS = ["risk", "delay", "dependency", "may delay", "could delay"]
 NEXT_STEP_KEYWORDS = ["pr", "raised", "open", "review", "merge", "deploy"]
+# Additional keywords for Slack standups (action verbs, common status phrases)
+SLACK_NEXT_STEP_KEYWORDS = ["implement", "create", "update", "connect", "coordinate", "meeting", "ticket", "sprint", "work with"]
 
 
 def now_iso() -> str:
@@ -118,6 +131,21 @@ def classify_event(
         if any(kw in text_lower for kw in NEXT_STEP_KEYWORDS):
             return ("next_steps", text)
 
+    # Slack messages: heuristic fallback (AI extraction handled separately in build_snapshot)
+    if event_kind == "message":
+        if any(kw in text_lower for kw in BLOCKER_KEYWORDS):
+            return ("blockers", text[:500])
+        if any(kw in text_lower for kw in DECISION_KEYWORDS):
+            return ("decisions", text[:500])
+        if any(kw in text_lower for kw in RISK_KEYWORDS):
+            return ("risks", text[:500])
+        all_next_keywords = NEXT_STEP_KEYWORDS + SLACK_NEXT_STEP_KEYWORDS
+        if any(kw in text_lower for kw in all_next_keywords):
+            return ("next_steps", text[:500])
+        # Fallback: substantial Slack messages (standups, updates) linked to project get a summary
+        if len(text_lower) > 150:
+            return ("next_steps", text[:500])
+
     return (None, "")
 
 
@@ -127,6 +155,7 @@ def build_snapshot_for_project(
     project_name: str,
     window_start: datetime,
     window_end: datetime,
+    projects_for_ai: Optional[List[Dict[str, str]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build status_json for a project from events in the window."""
     rows = conn.execute(
@@ -161,6 +190,74 @@ def build_snapshot_for_project(
         actor = r["actor_display"]
         text = r["text"]
         raw_json = r["raw_json"] if "raw_json" in r.keys() else None
+
+        # Slack messages: use AI extraction when enabled (better trimmed status from standups, etc.)
+        if event_kind == "message" and AI_ENABLED and _AI_EXTRACT_AVAILABLE and ai_extract_status_from_slack:
+            linked_project_ids = [
+                r["project_id"] for r in conn.execute(
+                    "SELECT project_id FROM event_project_links WHERE event_id = ?", (event_id,)
+                ).fetchall()
+            ]
+            ai_items = ai_extract_status_from_slack(
+                text, actor,
+                linked_project_ids=linked_project_ids if linked_project_ids else None,
+                projects_info=projects_for_ai,
+            )
+            added_any = False
+            for item in ai_items:
+                section = item.get("section")
+                summary = item.get("text", "")
+                owner = item.get("owner") or actor
+                item_project_ids = item.get("project_ids") or []
+                if not section or not summary:
+                    continue
+                # When AI assigned project_ids, only add to current project if it's in the list
+                if item_project_ids and project_id not in item_project_ids:
+                    continue
+                added_any = True
+                key = (summary[:80], owner or "")
+                if section == "progress" and key not in seen_progress:
+                    seen_progress.add(key)
+                    progress.append({"text": summary[:500], "owner": owner, "event_ids": [event_id]})
+                elif section == "blockers" and key not in seen_blockers:
+                    seen_blockers.add(key)
+                    blockers.append({"text": summary[:500], "owner": owner, "event_ids": [event_id]})
+                elif section == "decisions" and key not in seen_decisions:
+                    seen_decisions.add(key)
+                    decisions.append({"text": summary[:500], "owner": owner, "event_ids": [event_id]})
+                elif section == "next_steps" and key not in seen_next_steps:
+                    seen_next_steps.add(key)
+                    next_steps.append({"text": summary[:500], "owner": owner, "event_ids": [event_id]})
+                elif section == "risks" and key not in seen_risks:
+                    seen_risks.add(key)
+                    risks.append({"text": summary[:500], "event_ids": [event_id]})
+            if added_any:
+                continue  # AI handled this message
+            # AI returned items but none for this project: fall through to heuristic
+
+        # Jira comments and status changes: use AI extraction when enabled (semantic classification)
+        if event_kind in ("comment", "status_change") and AI_ENABLED and _AI_JIRA_AVAILABLE and ai_extract_status_from_jira:
+            issue_key = extract_issue_key(text, event_id)
+            ai_result = ai_extract_status_from_jira(text, event_kind, actor, issue_key)
+            if ai_result:
+                section, summary = ai_result
+                key = (summary[:80], actor or "")
+                if section == "progress" and key not in seen_progress:
+                    seen_progress.add(key)
+                    progress.append({"text": summary[:500], "owner": actor, "event_ids": [event_id]})
+                elif section == "blockers" and key not in seen_blockers:
+                    seen_blockers.add(key)
+                    blockers.append({"text": summary[:500], "owner": actor, "event_ids": [event_id]})
+                elif section == "decisions" and key not in seen_decisions:
+                    seen_decisions.add(key)
+                    decisions.append({"text": summary[:500], "owner": actor, "event_ids": [event_id]})
+                elif section == "next_steps" and key not in seen_next_steps:
+                    seen_next_steps.add(key)
+                    next_steps.append({"text": summary[:500], "owner": actor, "event_ids": [event_id]})
+                elif section == "risks" and key not in seen_risks:
+                    seen_risks.add(key)
+                    risks.append({"text": summary[:500], "event_ids": [event_id]})
+                continue
 
         section, summary = classify_event(event_kind, text, raw_json, actor)
         if not section or not summary:
@@ -219,8 +316,15 @@ def main() -> None:
     window_start = now - timedelta(days=WINDOW_DAYS)
 
     projects = conn.execute(
-        "SELECT project_id, name FROM projects WHERE is_active = 1"
+        "SELECT project_id, name, description FROM projects WHERE is_active = 1"
     ).fetchall()
+    projects_for_ai = [
+        {"project_id": r["project_id"], "name": r["name"], "description": r["description"] or ""}
+        for r in projects
+    ]
+
+    if AI_ENABLED:
+        print("AI status extraction: enabled (Slack + Jira)")
 
     created = 0
     for p in projects:
@@ -228,7 +332,8 @@ def main() -> None:
         project_name = p["name"]
 
         status = build_snapshot_for_project(
-            conn, project_id, project_name, window_start, window_end
+            conn, project_id, project_name, window_start, window_end,
+            projects_for_ai=projects_for_ai,
         )
         if not status:
             continue

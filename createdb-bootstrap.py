@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-"""ProjectPulse AI - Jira bootstrap (minimal DB for Jira ingestion)
+"""ProjectPulse AI - Jira + Slack bootstrap (minimal DB for ingestion)
 
 Creates:
   - projectpulse_demo.db (SQLite)
   - projectpulse_schema.sql (schema)
 
-Fills only the data needed to run jira_ingest_from_db.py:
+Fills the data needed to run jira_ingest_from_db.py and slack_ingest_from_db.py:
   - projects
-  - project_scopes (jira_epic entries only)
+  - project_scopes (jira_epic + slack_channel entries)
 
-No events, snapshots, or Slack scopes. Run jira_ingest_from_db.py after this
-to fetch Jira data into events and event_project_links.
+No events or snapshots. Run jira_ingest_from_db.py and slack_ingest_from_db.py
+after this to fetch data into events and event_project_links.
 
 Usage:
-  python createdb-jira-bootstrap.py
+  python createdb-bootstrap.py
 
-Customize epic keys by editing JIRA_EPIC_SCOPES below.
+Customize epic keys and Slack channel by editing JIRA_EPIC_SCOPES and
+SLACK_CHANNEL_NAME below.
 """
 
 import os
@@ -40,6 +41,10 @@ JIRA_EPIC_SCOPES = [
     ("proj_cloudability_migration", "Cloudability Migration for ThousandEyes", "Cloudability Migration for ThousandEyes", "CLOPS-1452"),
     ("proj_puppet_migration", "Puppet 7 to 8 migration", "Puppet 7 to 8 migration", "CLOPS-1369"),
 ]
+
+# Slack channel where all project discussions happen (name or ID)
+# Use channel name (e.g. efficiency-and-perf-internal); ingest resolves to ID via API
+SLACK_CHANNEL_NAME = "efficiency-and-perf-internal"
 
 SCHEMA_SQL = """PRAGMA foreign_keys = ON;
 
@@ -182,16 +187,23 @@ def main() -> None:
             "INSERT INTO project_scopes(scope_id,project_id,source_type,scope_kind,scope_value,created_at) VALUES (?,?,?,?,?,?)",
             (scope_id, project_id, "jira", "jira_epic", epic_key, created_iso),
         )
+        scope_id_slack = f"scope_slack_{project_id}"
+        conn.execute(
+            "INSERT INTO project_scopes(scope_id,project_id,source_type,scope_kind,scope_value,created_at) VALUES (?,?,?,?,?,?)",
+            (scope_id_slack, project_id, "slack", "slack_channel", SLACK_CHANNEL_NAME, created_iso),
+        )
 
     conn.commit()
     conn.close()
 
-    print(f"✅ Created Jira bootstrap DB: {DB_PATH}")
-    print(f"✅ Wrote schema:             {SCHEMA_PATH}")
+    print(f"✅ Created bootstrap DB: {DB_PATH}")
+    print(f"✅ Wrote schema:         {SCHEMA_PATH}")
     print(f"✅ Inserted {len(JIRA_EPIC_SCOPES)} project(s) with jira_epic scope(s)")
+    print(f"✅ Inserted {len(JIRA_EPIC_SCOPES)} project(s) with slack_channel scope(s) -> {SLACK_CHANNEL_NAME}")
     print()
-    print("Next: set JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN and run:")
-    print("  python jira_ingest_from_db.py")
+    print("Next:")
+    print("  Jira:  set JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN and run python jira_ingest_from_db.py")
+    print("  Slack: set SLACK_BOT_TOKEN and run python slack_ingest_from_db.py")
 
 
 if __name__ == "__main__":
