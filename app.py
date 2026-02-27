@@ -6,19 +6,24 @@ five core views:
   2. Changes           ("What changed since Monday?")
   3. Blockers          (auto-detected blocker signals)
   4. Weekly Summary    (structured weekly report + chart)
-  5. Ask ProjectPulse  (keyword Q&A grounded in project data)
+  5. Ask ProjectPulse  (Q&A via MCP server, grounded in project data)
 """
 
 from __future__ import annotations
 
 import datetime
+import json
 import os
+import re
 
 import requests
 import streamlit as st
 import plotly.graph_objects as go
 
+from mcp.client import MCPClient, format_response
+
 API_BASE = os.environ.get("PROJECTPULSE_API_URL", "http://127.0.0.1:5050")
+MCP_URL = os.environ.get("PROJECTPULSE_MCP_URL", "http://127.0.0.1:8000/sse")
 
 SECTION_COLORS = {
     "progress": "#10b981",
@@ -361,26 +366,164 @@ def page_weekly_summary(project_id: str, project_name: str):
     st.plotly_chart(fig, use_container_width=True)
 
 
+_TOOL_ROUTES: list[tuple[list[str], str, dict]] = [
+    (
+        ["block", "stuck", "waiting", "impediment"],
+        "get_project_blockers",
+        {},
+    ),
+    (
+        ["change", "changed", "delta", "missed", "catch me up",
+         "since", "happened"],
+        "get_project_changes",
+        {},
+    ),
+    (
+        ["recent", "latest", "activity", "event", "feed"],
+        "get_project_events",
+        {"limit": 10},
+    ),
+    (
+        ["who", "people", "team", "contributor"],
+        "get_project_events",
+        {"limit": 30},
+    ),
+    (
+        ["status", "overview", "summary", "stand", "how is",
+         "what's going", "how's", "pulse"],
+        "get_project_pulse",
+        {},
+    ),
+    (
+        ["risk", "concern", "worry", "threat"],
+        "get_project_pulse",
+        {},
+    ),
+    (
+        ["decision", "decided", "chose", "selected"],
+        "get_project_pulse",
+        {},
+    ),
+    (
+        ["next", "upcoming", "plan", "todo", "to do"],
+        "get_project_pulse",
+        {},
+    ),
+    (
+        ["progress", "done", "completed", "finished"],
+        "get_project_pulse",
+        {},
+    ),
+]
+
+# ── natural-language date parsing ────────────────────────────────────
+
+_WEEKDAYS = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3,
+    "fri": 4, "sat": 5, "sun": 6,
+}
+
+_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2,
+    "mar": 3, "march": 3, "apr": 4, "april": 4,
+    "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+
+
+def _parse_since(question: str) -> str:
+    """Extract a 'since' ISO date from a natural-language question."""
+    q = question.lower()
+    today = datetime.datetime.now()
+
+    if "yesterday" in q:
+        return (today - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+
+    if re.search(r"\btoday\b", q):
+        return today.strftime("%Y-%m-%d")
+
+    if "this week" in q:
+        return (today - datetime.timedelta(days=today.weekday())).strftime("%Y-%m-%d")
+
+    if re.search(r"last\s+week\b", q) and not re.search(r"last\s+\d+\s+week", q):
+        return (today - datetime.timedelta(days=today.weekday() + 7)).strftime("%Y-%m-%d")
+
+    m = re.search(r"(?:last|past)\s+(\d+)\s+hours?", q)
+    if m:
+        return (today - datetime.timedelta(hours=int(m.group(1)))).strftime("%Y-%m-%d")
+
+    m = re.search(r"(?:last|past)\s+(\d+)\s+days?", q) or re.search(
+        r"(\d+)\s+days?\s+ago", q
+    )
+    if m:
+        return (today - datetime.timedelta(days=int(m.group(1)))).strftime("%Y-%m-%d")
+
+    m = re.search(r"(?:last|past)\s+(\d+)\s+weeks?", q) or re.search(
+        r"(\d+)\s+weeks?\s+ago", q
+    )
+    if m:
+        return (today - datetime.timedelta(weeks=int(m.group(1)))).strftime("%Y-%m-%d")
+
+    for name, dow in _WEEKDAYS.items():
+        if name in q:
+            days_back = (today.weekday() - dow) % 7
+            if days_back == 0:
+                days_back = 7
+            return (today - datetime.timedelta(days=days_back)).strftime("%Y-%m-%d")
+
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", q)
+    if m:
+        return m.group(1)
+
+    for name, month in _MONTHS.items():
+        m = re.search(rf"\b{name}\s+(\d{{1,2}})\b", q)
+        if m:
+            try:
+                return datetime.datetime(
+                    today.year, month, int(m.group(1))
+                ).strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+
+    return (today - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+
+
+def _resolve_tool(project_id: str, question: str) -> tuple[str, dict]:
+    """Pick the MCP tool and build arguments for *question*."""
+    q = question.lower()
+    for keywords, tool, extra in _TOOL_ROUTES:
+        if any(kw in q for kw in keywords):
+            args = {"project_id": project_id, **extra}
+            if tool == "get_project_changes":
+                args["since"] = _parse_since(question)
+            return tool, args
+
+    return "ask_project", {"project_id": project_id, "question": question}
+
+
 def page_ask(project_id: str, project_name: str):
     st.header(f"Ask ProjectPulse — {project_name}")
     st.caption(
         "Ask natural-language questions about this project. "
-        "Answers are grounded in real project data from the API."
+        "Answers are grounded in real project data via the MCP server."
     )
-
-    pulse = api_get("/api/pulse", {"project_id": project_id})
-    events_data = api_get("/api/events", {"project_id": project_id, "limit": 30})
-
-    status = pulse.get("sections", {}) if pulse else {}
-    headline = pulse.get("headline", "") if pulse else ""
-    events = events_data.get("events", []) if events_data else []
 
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
-    for msg in st.session_state.chat_history:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    for entry in st.session_state.chat_history:
+        with st.chat_message(entry["role"]):
+            if entry.get("tool"):
+                with st.expander(
+                    f"🔧  Called **{entry['tool']}** {entry.get('args', '')}",
+                    expanded=False,
+                ):
+                    st.code(json.dumps(entry["args_full"], indent=2), language="json")
+            st.markdown(entry["content"])
 
     question = st.chat_input("e.g. What is the current status of the MVP?")
     if not question:
@@ -395,109 +538,31 @@ def page_ask(project_id: str, project_name: str):
     with st.chat_message("user"):
         st.markdown(question)
 
-    answer = _answer_question(question, headline, status, events, project_name)
+    tool_name, tool_args = _resolve_tool(project_id, question)
 
-    st.session_state.chat_history.append({"role": "assistant", "content": answer})
     with st.chat_message("assistant"):
-        st.markdown(answer)
+        with st.expander(
+            f"🔧  Calling **{tool_name}**",
+            expanded=True,
+        ):
+            st.code(json.dumps(tool_args, indent=2), language="json")
 
+        with st.spinner(f"Running {tool_name}…"):
+            try:
+                with MCPClient(MCP_URL) as mcp:
+                    raw = mcp.call_tool(tool_name, tool_args)
+                result = format_response(raw)
+            except Exception as exc:
+                result = f"**Error contacting MCP server:** {exc}"
 
-def _answer_question(
-    question: str, headline: str, sections: dict, events: list, project_name: str
-) -> str:
-    q = question.lower()
+        st.markdown(result)
 
-    if any(kw in q for kw in ("status", "overview", "summary", "stand", "how is", "what's going")):
-        progress = sections.get("progress", [])
-        blockers = sections.get("blockers", [])
-        lines = [f"**{project_name} — Current Status**", ""]
-        if headline:
-            lines.append(f"> {headline}")
-            lines.append("")
-        if progress:
-            lines.append("**Progress:**")
-            for p in progress:
-                lines.append(f"- {p['text']} (Owner: {p.get('owner', 'N/A')})")
-        if blockers:
-            lines.append("\n**Blockers:**")
-            for b in blockers:
-                lines.append(f"- {b['text']} (Owner: {b.get('owner', 'N/A')})")
-        return "\n".join(lines)
-
-    if any(kw in q for kw in ("block", "stuck", "waiting", "impediment")):
-        blockers = sections.get("blockers", [])
-        if not blockers:
-            return f"No blockers currently reported for **{project_name}**."
-        lines = [f"**Active Blockers — {project_name}**", ""]
-        for b in blockers:
-            lines.append(f"- {b['text']} — Owner: **{b.get('owner', 'Unassigned')}**")
-            for ev in b.get("evidence", []):
-                lines.append(f"  → [{ev['source_type'].title()}]({ev['permalink']})")
-        return "\n".join(lines)
-
-    if any(kw in q for kw in ("decision", "decided", "chose", "selected")):
-        decisions = sections.get("decisions", [])
-        if not decisions:
-            return f"No decisions recorded this period for **{project_name}**."
-        lines = [f"**Decisions — {project_name}**", ""]
-        for d in decisions:
-            lines.append(f"- {d['text']} — {d.get('owner', '')}")
-        return "\n".join(lines)
-
-    if any(kw in q for kw in ("risk", "concern", "worry", "threat")):
-        risks = sections.get("risks", [])
-        if not risks:
-            return f"No risks flagged for **{project_name}**."
-        lines = [f"**Risks — {project_name}**", ""]
-        for r in risks:
-            lines.append(f"- {r['text']}")
-        return "\n".join(lines)
-
-    if any(kw in q for kw in ("next", "upcoming", "plan", "todo", "to do")):
-        ns = sections.get("next_steps", [])
-        if not ns:
-            return f"No next steps recorded for **{project_name}**."
-        lines = [f"**Next Steps — {project_name}**", ""]
-        for n in ns:
-            lines.append(f"- {n['text']} — Owner: **{n.get('owner', 'N/A')}**")
-        return "\n".join(lines)
-
-    if any(kw in q for kw in ("who", "people", "team", "contributor")):
-        actors = {ev.get("actor") for ev in events if ev.get("actor")}
-        if not actors:
-            return "No contributor information available."
-        lines = [f"**Contributors — {project_name}**", ""]
-        for a in sorted(actors):
-            lines.append(f"- {a}")
-        return "\n".join(lines)
-
-    if any(kw in q for kw in ("recent", "latest", "last", "activity", "event")):
-        if not events:
-            return "No recent activity found."
-        lines = [f"**Recent Activity — {project_name}**", ""]
-        for ev in events[:5]:
-            occurred = (ev.get("occurred_at") or "")[:16]
-            lines.append(
-                f"- [{ev['source_type'].upper()} · {kind_label(ev['event_kind'])}] "
-                f"{ev['text']} — *{ev.get('actor', '')}* ({occurred})"
-            )
-        return "\n".join(lines)
-
-    lines = [f"Here's what I know about **{project_name}**:", ""]
-    if headline:
-        lines.append(f"> {headline}")
-        lines.append("")
-    for key, label in SECTION_LABELS.items():
-        items = sections.get(key, [])
-        if items:
-            lines.append(f"**{label}:** " + "; ".join(i["text"] for i in items))
-
-    if events:
-        lines.append("\n**Recent events:**")
-        for ev in events[:3]:
-            lines.append(f"- {ev['text']} ({ev['source_type']} · {ev.get('actor', '')})")
-
-    return "\n".join(lines)
+    st.session_state.chat_history.append({
+        "role": "assistant",
+        "content": result,
+        "tool": tool_name,
+        "args_full": tool_args,
+    })
 
 
 # ── Main ─────────────────────────────────────────────────────────────
@@ -518,15 +583,35 @@ def main():
         [data-testid="stSidebar"] {
             background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
         }
-        [data-testid="stSidebar"] * { color: #e2e8f0 !important; }
-        [data-testid="stSidebar"] .stSelectbox label,
-        [data-testid="stSidebar"] .stRadio label { color: #94a3b8 !important; }
+        [data-testid="stSidebar"] p,
+        [data-testid="stSidebar"] span,
+        [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3, [data-testid="stSidebar"] h4,
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] .stMarkdown,
+        [data-testid="stSidebar"] .stRadio label,
+        [data-testid="stSidebar"] .stRadio div[role="radiogroup"] label span,
+        [data-testid="stSidebar"] [data-testid="stCaption"],
+        [data-testid="stSidebar"] svg {
+            color: #e2e8f0 !important;
+            fill: #e2e8f0 !important;
+        }
+        [data-testid="stSidebar"] .stSelectbox label { color: #94a3b8 !important; }
+        [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] {
+            color: #1e293b !important;
+        }
+        [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] * {
+            color: #1e293b !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
     with st.sidebar:
+        logo_path = os.path.join(os.path.dirname(__file__), "heart-beat-pulse-logo-free-vector.png")
+        if os.path.exists(logo_path):
+            st.image(logo_path, width=180)
         st.markdown("## ProjectPulse AI")
         st.caption("Real-time project intelligence")
         st.divider()
@@ -558,6 +643,7 @@ def main():
 
         st.divider()
         st.caption(f"API: {API_BASE}")
+        st.caption(f"MCP: {MCP_URL}")
         st.caption("ProjectPulse AI · Hackathon 2026")
 
     if page == "Overview":
