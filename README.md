@@ -69,11 +69,12 @@ python slack_ingest_from_db.py
 
 Use `INCREMENTAL=1` to fetch only messages after the last run, or `FULL_REFRESH=1` to fetch all messages.
 
-**AI-powered project attribution and status extraction** (optional):
+**AI-powered project attribution and status extraction** (optional, uses AWS Bedrock):
 ```bash
-export OPENAI_API_KEY=sk-...
 export AI_ENABLED=1
-python slack_ingest_from_db.py      # AI classifies messages to projects when rule-based match fails
+export AWS_REGION=us-east-1
+export BEDROCK_MODEL_ID=anthropic.claude-3-haiku-20240307-v1:0
+python slack_ingest_from_db.py      # AI classifies messages to projects (Bedrock)
 python generate_status_snapshots.py # AI extracts trimmed progress/blockers/decisions from Slack standups
 ```
 
@@ -246,8 +247,10 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://0.0.0.0
 
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `AI_ENABLED` | `0` | If `1`, use OpenAI to classify messages to projects when rule-based match fails |
-| `OPENAI_API_KEY` | — | Required for AI. Model: `OPENAI_MODEL` (default `gpt-4o-mini`) |
+| `AI_ENABLED` | `0` | If `1`, use AWS Bedrock to classify messages to projects |
+| `AWS_REGION` | `us-east-1` | AWS region for Bedrock |
+| `BEDROCK_MODEL_ID` | `anthropic.claude-3-haiku-20240307-v1:0` | Bedrock model ID |
+| `AWS_PROFILE` | — | Optional; for local dev with SSO/profile |
 
 ## Snapshot generator options
 
@@ -255,8 +258,9 @@ Open http://localhost:6274, select **SSE** transport, connect to `http://0.0.0.0
 |---------|---------|-------------|
 | `DB_PATH` | `./projectpulse_demo.db` | Database path |
 | `WINDOW_DAYS` | `7` | Days of events to include in snapshot (use `14` for 2 weeks) |
-| `AI_ENABLED` | `0` | If `1`, use OpenAI to extract trimmed progress/blockers/decisions from Slack standups |
-| `OPENAI_API_KEY` | — | Required for AI extraction |
+| `AI_ENABLED` | `0` | If `1`, use AWS Bedrock to extract status from Slack and Jira |
+| `AWS_REGION` | `us-east-1` | AWS region for Bedrock |
+| `BEDROCK_MODEL_ID` | `anthropic.claude-3-haiku-20240307-v1:0` | Bedrock model ID |
 
 ---
 

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """ProjectPulse - AI utilities for LLM-powered classification and extraction.
 
-Uses OpenAI API (or compatible) for:
+Uses AWS Bedrock API (boto3) for:
   - Project attribution: classify Slack messages to relevant projects
   - Status extraction: extract trimmed progress/blockers/decisions from Slack and Jira messages
   - Message formatting: format raw Slack text for clean display in status views
 
-Env: OPENAI_API_KEY (required for AI features). Set AI_ENABLED=1 to use.
+Env: AI_ENABLED=1, AWS_REGION, BEDROCK_MODEL_ID. Optional: AWS_PROFILE for local dev.
+Credentials: AWS profile (AWS_PROFILE) or ambient (IAM role, env vars).
 """
 
 from __future__ import annotations
@@ -16,7 +17,66 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 AI_ENABLED = os.environ.get("AI_ENABLED", "0") == "1"
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+AWS_PROFILE = os.environ.get("AWS_PROFILE")
+BEDROCK_MODEL_ID = os.environ.get(
+    "BEDROCK_MODEL_ID",
+    "anthropic.claude-3-haiku-20240307-v1:0",
+)
+
+
+def _get_bedrock_client():
+    """Create Bedrock runtime client using kosmos-ai-agno-agents pattern.
+
+    Uses boto3.Session with profile_name and region_name. Credentials from
+    profile or ambient (IAM role, AWS_ACCESS_KEY_ID, etc.).
+    """
+    if not AI_ENABLED:
+        return None
+    try:
+        import boto3
+
+        session_kwargs: Dict[str, Any] = {"region_name": AWS_REGION}
+        if AWS_PROFILE:
+            session_kwargs["profile_name"] = AWS_PROFILE
+
+        session = boto3.Session(**session_kwargs)
+        credentials = session.get_credentials()
+        if not credentials:
+            return None
+
+        return session.client("bedrock-runtime")
+    except Exception:
+        return None
+
+
+def _completion(prompt: str, *, temperature: float = 0.2, max_tokens: int = 2048) -> Optional[str]:
+    """Call Bedrock Converse API for a single user prompt. Returns model text or None."""
+    client = _get_bedrock_client()
+    if not client:
+        return None
+
+    messages = [{"role": "user", "content": [{"text": prompt}]}]
+    inference_config = {
+        "temperature": temperature,
+        "maxTokens": max_tokens,
+    }
+
+    try:
+        response = client.converse(
+            modelId=BEDROCK_MODEL_ID,
+            messages=messages,
+            inferenceConfig=inference_config,
+        )
+        content_blocks = response.get("output", {}).get("message", {}).get("content", [])
+        if not content_blocks:
+            return None
+        text_block = content_blocks[0]
+        if "text" not in text_block:
+            return None
+        return (text_block["text"] or "").strip()
+    except Exception:
+        return None
 
 
 def ai_format_message_for_status(raw_text: str) -> Optional[str]:
@@ -27,11 +87,7 @@ def ai_format_message_for_status(raw_text: str) -> Optional[str]:
     - Removes casual chat and noise
     - Returns None on failure; caller should fall back to raw text.
     """
-    if not AI_ENABLED or not OPENAI_API_KEY or not (raw_text or "").strip():
-        return None
-
-    client = _client()
-    if not client:
+    if not AI_ENABLED or not (raw_text or "").strip():
         return None
 
     prompt = f"""Format this Slack message for display in a project status view. Keep it concise and readable.
@@ -49,27 +105,12 @@ Raw message:
 {(raw_text or "")[:4000]}
 ---"""
 
-    try:
-        resp = client.chat.completions.create(
-            model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-        )
-        content = (resp.choices[0].message.content or "").strip()
-        if content == "[CASUAL]":
-            return raw_text[:500]  # Keep original for casual messages
-        return content[:2000] if content else None
-    except Exception:
+    content = _completion(prompt, temperature=0.2)
+    if not content:
         return None
-
-
-def _client():
-    """Lazy import to avoid requiring openai when AI is disabled."""
-    try:
-        from openai import OpenAI
-        return OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-    except ImportError:
-        return None
+    if content == "[CASUAL]":
+        return raw_text[:500]
+    return content[:2000]
 
 
 def ai_classify_message_to_projects(
@@ -82,11 +123,7 @@ def ai_classify_message_to_projects(
     projects: [{"project_id": "...", "name": "...", "description": "..."}, ...]
     Returns: [(project_id, attribution_type, confidence, rationale), ...]
     """
-    if not AI_ENABLED or not OPENAI_API_KEY:
-        return []
-
-    client = _client()
-    if not client:
+    if not AI_ENABLED:
         return []
 
     projects_str = "\n".join(
@@ -111,14 +148,11 @@ Only include projects that are clearly relevant. Use confidence 0.0-1.0 (0.9+ fo
 If the message is unrelated to any project (e.g. casual chat, weather), return [].
 JSON only, no other text."""
 
+    content = _completion(prompt, temperature=0.2)
+    if not content:
+        return []
+
     try:
-        resp = client.chat.completions.create(
-            model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-        )
-        content = (resp.choices[0].message.content or "").strip()
-        # Parse JSON (handle markdown code blocks)
         if content.startswith("```"):
             content = content.split("```")[1]
             if content.startswith("json"):
@@ -133,12 +167,14 @@ JSON only, no other text."""
             if pid and pid in eligible_project_ids:
                 conf = float(item.get("confidence", 0.7))
                 conf = max(0.0, min(1.0, conf))
-                results.append((
-                    pid,
-                    "ai_classify",
-                    conf,
-                    (item.get("rationale") or "AI classification")[:200],
-                ))
+                results.append(
+                    (
+                        pid,
+                        "ai_classify",
+                        conf,
+                        (item.get("rationale") or "AI classification")[:200],
+                    )
+                )
         return results
     except Exception:
         return []
@@ -155,11 +191,7 @@ def ai_extract_status_from_jira(
     Returns (section, summary_text) or None if unclassified.
     section: progress | blockers | decisions | next_steps | risks
     """
-    if not AI_ENABLED or not OPENAI_API_KEY or not (text or "").strip():
-        return None
-
-    client = _client()
-    if not client:
+    if not AI_ENABLED or not (text or "").strip():
         return None
 
     actor = actor_display or "Unknown"
@@ -183,13 +215,11 @@ Respond with JSON: {{"section": "progress|blockers|decisions|next_steps|risks", 
 If the content is not project-relevant status (e.g. trivial "LGTM"), return {{"section": null, "summary": null}}.
 JSON only."""
 
+    content = _completion(prompt, temperature=0.2)
+    if not content:
+        return None
+
     try:
-        resp = client.chat.completions.create(
-            model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-        )
-        content = (resp.choices[0].message.content or "").strip()
         if content.startswith("```"):
             content = content.split("```")[1]
             if content.startswith("json"):
@@ -216,11 +246,7 @@ def ai_extract_status_from_slack(
     When linked_project_ids and projects_info are provided, assigns each item to the relevant project(s).
     Returns: [{"section": "...", "text": "...", "owner": "...", "project_ids": ["proj_xxx", ...]}, ...]
     """
-    if not AI_ENABLED or not OPENAI_API_KEY:
-        return []
-
-    client = _client()
-    if not client:
+    if not AI_ENABLED:
         return []
 
     actor = actor_display or "Unknown"
@@ -261,13 +287,11 @@ Respond with JSON array: {output_schema}
 Only include items that are clearly project-relevant. Skip casual chat. Return [] if nothing relevant.
 JSON only, no other text."""
 
+    content = _completion(prompt, temperature=0.2)
+    if not content:
+        return []
+
     try:
-        resp = client.chat.completions.create(
-            model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-        )
-        content = (resp.choices[0].message.content or "").strip()
         if content.startswith("```"):
             content = content.split("```")[1]
             if content.startswith("json"):
@@ -288,12 +312,14 @@ JSON only, no other text."""
             project_ids = item.get("project_ids")
             if not isinstance(project_ids, list):
                 project_ids = []
-            results.append({
-                "section": section,
-                "text": text[:500],
-                "owner": owner,
-                "project_ids": project_ids,
-            })
+            results.append(
+                {
+                    "section": section,
+                    "text": text[:500],
+                    "owner": owner,
+                    "project_ids": project_ids,
+                }
+            )
         return results
     except Exception:
         return []

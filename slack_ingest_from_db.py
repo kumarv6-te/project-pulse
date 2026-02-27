@@ -31,8 +31,10 @@ Optional:
   DEBUG=1           Print channel fetches and message counts.
   SCOPE_RULE=1      If set, fall back to scope_rule: link ALL messages to all projects
                     with channel in scope (legacy behavior). Default: use matching only.
-  AI_ENABLED=1      If set, use OpenAI to classify messages first; rules (Jira/keyword) used only when AI returns nothing.
-  OPENAI_API_KEY    Required for AI classification. OPENAI_MODEL defaults to gpt-4o-mini.
+  AI_ENABLED=1      If set, use AWS Bedrock to classify messages first; rules (Jira/keyword) used only when AI returns nothing.
+  AWS_REGION        AWS region for Bedrock (default us-east-1)
+  BEDROCK_MODEL_ID  Bedrock model ID (default anthropic.claude-3-haiku-20240307-v1:0)
+  AWS_PROFILE       Optional; for local dev with SSO/profile
 
 Future ML classification options:
   - Embedding similarity: project descriptions + message text -> cosine similarity threshold
@@ -591,7 +593,7 @@ def main() -> None:
         print(f"  Jira keys: {dict(jira_key_to_projects)}")
         print(f"  Project keywords (sample): {list(project_keywords.items())[:3]}")
     if AI_ENABLED:
-        print("  AI classification: enabled (OPENAI_API_KEY)")
+        print("  AI classification: enabled (Bedrock)")
 
     print(f"DB: {DB_PATH}")
     print(f"Found {len(scopes)} slack_channel scopes -> {len(resolved_scopes)} resolved.")

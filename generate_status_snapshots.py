@@ -14,8 +14,9 @@ Usage:
 Env vars:
   DB_PATH         default ./projectpulse_demo.db
   WINDOW_DAYS     default 7 (days of events to include in snapshot)
-  AI_ENABLED=1    Use OpenAI to extract status from Slack and Jira events
-  OPENAI_API_KEY  Required for AI. OPENAI_MODEL defaults to gpt-4o-mini.
+  AI_ENABLED=1    Use AWS Bedrock to extract status from Slack and Jira events
+  AWS_REGION      AWS region for Bedrock (default us-east-1)
+  BEDROCK_MODEL_ID Bedrock model ID (default anthropic.claude-3-haiku-20240307-v1:0)
 """
 
 from __future__ import annotations
